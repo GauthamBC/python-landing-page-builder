@@ -1,11 +1,10 @@
-"""Landing Page Studio v3: one self-contained JSON blueprint in, two HTML pages out.
+"""Landing Page Studio v4: brand-neutral JSON in, two brand-themed HTML pages out.
 
 Deploy on Streamlit Community Cloud alongside landing_engine.py and requirements.txt.
 No spreadsheet upload or AI API is required at runtime.
 """
 from __future__ import annotations
 
-from hashlib import sha256
 from io import BytesIO
 import json
 import re
@@ -24,7 +23,7 @@ h1,h2,h3{letter-spacing:-.025em}
 </style>""", unsafe_allow_html=True)
 
 st.title("Landing Page Studio")
-st.caption("Upload or paste one complete ChatGPT JSON blueprint. Both interactive HTML pages generate automatically.")
+st.caption("Upload one brand-neutral JSON blueprint. Choose the publication in the sidebar; both HTML pages update automatically.")
 
 
 def parse_blueprint(source_text: str) -> dict:
@@ -40,36 +39,6 @@ def parse_blueprint(source_text: str) -> dict:
     if not isinstance(result, dict):
         raise ValueError("The blueprint must be a single JSON object, not an array or plain text.")
     return result
-
-
-def brand_from_blueprint(raw: dict) -> tuple[str, bool]:
-    """Use an explicit brand first; fall back to clearly identifiable source links."""
-    specified = str(raw.get("brand") or raw.get("publication_brand") or "").strip()
-    for candidate in BRANDS:
-        if specified.casefold() == candidate.casefold():
-            return candidate, True
-    aliases = {
-        "actionnetwork": "Action Network",
-        "vegasinsider": "VegasInsider",
-        "rotogrinders": "RotoGrinders",
-        "canadasportsbetting": "Canada Sports Betting",
-    }
-    simple = re.sub(r"[^a-z]", "", specified.casefold())
-    if simple in aliases:
-        return aliases[simple], True
-    # Existing v2 blueprints did not have brand; infer ONLY from linked publisher domains.
-    for item in (raw.get("methodology") or {}).get("sources", []):
-        url = item.get("url", "") if isinstance(item, dict) else ""
-        url = str(url).casefold()
-        for domain, candidate in (
-            ("canadasportsbetting.ca/", "Canada Sports Betting"),
-            ("actionnetwork.com/", "Action Network"),
-            ("vegasinsider.com/", "VegasInsider"),
-            ("rotogrinders.com/", "RotoGrinders"),
-        ):
-            if domain in url:
-                return candidate, True
-    return "Action Network", False
 
 
 def ensure_embedded_rows(raw: dict) -> None:
@@ -96,53 +65,95 @@ reminder = (
     "Include every actual record from the primary uploaded Excel/CSV research sheet inside the top-level 'rows' array, "
     "using the exact original column names, with numbers as JSON numbers (not formatted strings). "
     "Do not leave 'rows' empty, do not use ellipses or sample/placeholder data, and do not invent missing values. "
-    "Set the top-level 'brand' to the correct publication brand. "
+    "Do not specify a brand, hex colors, logos or CSS; choose the publication only inside Streamlit. "
     "Ensure the values align with 'entity_key', 'primary_metric', 'columns', and all detailed widget metric keys. "
     "Return valid JSON only, with no Markdown fences. Do not ask me to upload the spreadsheet to Streamlit."
 )
 
-st.subheader("Your completed campaign blueprint")
+st.subheader("1 · Upload your final JSON")
 upload_tab, paste_tab = st.tabs(["Upload JSON", "Paste JSON"])
 with upload_tab:
-    uploaded = st.file_uploader("Final ChatGPT blueprint (.json or .txt)", type=["json", "txt"], help="The file must contain both editorial content and the research rows.")
+    uploaded = st.file_uploader(
+        "Complete ChatGPT blueprint (.json or .txt)",
+        type=["json", "txt"],
+        help="One complete JSON containing editorial copy, methodology and all the ranking records inside 'rows'.",
+    )
 with paste_tab:
-    pasted = st.text_area("Or paste the complete JSON", height=145, placeholder='{\n  "brand": "Action Network",\n  "title": "...",\n  "rows": [{"Team": "...", "Score": 1.23}]\n}')
+    pasted = st.text_area(
+        "Or paste the full JSON",
+        height=145,
+        placeholder='{\n  "title": "...",\n  "visual_style": "editorial",\n  "rows": [{"Team": "...", "Score": 1.23}]\n}',
+    )
 
-# Prefer the uploaded file when both channels are populated.
+# A neutral blueprint is reusable across all brands. A JSON upload must NEVER
+# infer, reset, or override the user's publication choice (including from URLs).
+# Session state persists when the input document changes.
 source_bytes = uploaded.getvalue() if uploaded is not None else pasted.encode("utf-8")
 if uploaded is not None and pasted.strip():
-    st.caption("Using the uploaded file. Remove it if you want to use the pasted JSON instead.")
+    st.caption("Using the uploaded file. Remove it to use pasted JSON instead.")
+
+raw = None
+parse_error = None
+if source_bytes.strip():
+    try:
+        raw = parse_blueprint(source_bytes.decode("utf-8-sig"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        parse_error = str(exc)
+
+if "studio_brand" not in st.session_state:
+    st.session_state["studio_brand"] = "Action Network"
+
+with st.sidebar:
+    st.header("Campaign Settings")
+    brand = st.selectbox(
+        "Publication Brand",
+        list(BRANDS),
+        key="studio_brand",
+        help="The selected brand alone sets the page palette and lockup. Source URLs or old brand fields in JSON cannot change it.",
+    )
+    theme = BRANDS[brand]
+    st.markdown(
+        f'<div style="display:flex;gap:5px;margin:6px 0 12px">'
+        + ''.join(f'<span style="width:46px;height:11px;background:{theme[k]};border-radius:3px"></span>' for k in ("primary", "bright", "navy"))
+        + '</div>', unsafe_allow_html=True,
+    )
+    st.caption("Brand selection stays the same when you upload a different blueprint.")
+    st.caption("Palette status: " + theme["note"])
+    show_previews = st.toggle("Show HTML previews", value=True)
+    with st.expander("Available widgets", expanded=False):
+        st.markdown("**Implemented now:** ranking chart ↔ sortable table, heatmap table, two-metric comparison, scatterplot, numeric cards, point map (latitude/longitude), editorial callout.")
+        st.caption("Specialized illustrated maps, advanced animated scenes, route diagrams and other designs from the HTML references have not all been ported to the engine.")
 
 if not source_bytes.strip():
-    st.info("Upload your finished JSON file above, or paste the JSON. No Excel/CSV upload or Build command is required here.")
+    st.info("Upload or paste one **self-contained JSON**. No spreadsheet or Build command is required.")
+    st.stop()
+if parse_error:
+    st.error("Could not read the JSON: " + parse_error)
     st.stop()
 
+st.subheader("2 · Your automatically generated landing pages")
+st.caption(f"Campaign: **{raw.get('title') or 'Untitled'}** · Publication selected in Streamlit: **{brand}**")
+legacy_brand_fields = {"brand", "publication_brand", "theme", "palette", "colors", "primary_color", "secondary_color", "accent_color", "brand_colors", "logo", "logo_url"}
+if any(k in raw for k in legacy_brand_fields):
+    st.info("This JSON has older branding fields. They are ignored. Only the Streamlit Publication Brand dropdown controls the page colors and brand lockup.")
 try:
-    raw = parse_blueprint(source_bytes.decode("utf-8-sig"))
     ensure_embedded_rows(raw)
     spec = normalize(raw)
     if not spec.get("primary_metric"):
-        raise ValueError("The blueprint has no primary_metric. Ask ChatGPT to specify the ranking metric.")
+        raise ValueError("The blueprint has no 'primary_metric'. ChatGPT needs to specify the ranking metric.")
     metric = spec["primary_metric"]
     if not any(n(row.get(metric)) is not None for row in spec["rows"]):
-        raise ValueError(f"The primary_metric '{metric}' has no numeric data in the embedded rows.")
+        raise ValueError(f"The primary_metric '{metric}' has no numeric research values in 'rows'.")
     if not any(str(row.get(spec["entity_key"], "")).strip() for row in spec["rows"]):
-        raise ValueError(f"No row has a value for entity_key '{spec['entity_key']}'.")
+        raise ValueError(f"There are no values for the entity_key '{spec['entity_key']}' in 'rows'.")
     warnings = validate(spec)
 except (ValueError, UnicodeDecodeError, TypeError, KeyError) as exc:
-    st.error(f"Cannot generate these landing pages: {exc}")
-    st.caption("For older JSON blueprints with empty rows, copy the instruction below into the ChatGPT Project that already has your spreadsheet.")
+    if raw.get("rows") == [] or "rows" not in raw:
+        st.warning("Your JSON **is recognized** and its editorial content is readable. But it has **0 research rows**, so the generator cannot build the rankings or tables yet. This is a missing-data issue, not an upload issue.")
+    st.error(str(exc))
+    st.markdown("**One-time fix:** In the same ChatGPT Project conversation that has your research spreadsheet, paste this request, then upload the newly generated complete JSON here:")
     st.code(reminder, language=None)
     st.stop()
-
-selected_brand, identified = brand_from_blueprint(raw)
-with st.expander("Brand and preview settings", expanded=False):
-    brand = st.selectbox("Publication brand", list(BRANDS), index=list(BRANDS).index(selected_brand), help="Automatically read from the JSON when provided. You can override it here.")
-    show_previews = st.checkbox("Show interactive previews", value=True)
-    if not identified:
-        st.warning("No recognized publication brand was found in the blueprint. Defaulting to Action Network; choose the correct brand above.")
-    if brand != "Action Network":
-        st.caption("Non-Action Network colors and text lockups are provisional. Add approved brand assets before publication.")
 
 try:
     quick_html = render(spec, brand, "simple")
@@ -157,7 +168,7 @@ except Exception as exc:
     st.error(f"The renderer could not build this blueprint: {exc}")
     st.stop()
 
-st.success(f"Ready: both HTML pages generated automatically from {len(spec['rows']):,} embedded records. Brand: {brand}.")
+st.success(f"Generated both HTML pages from {len(spec['rows']):,} embedded records · {brand}.")
 for warning in warnings:
     st.warning(warning)
 
