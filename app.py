@@ -1,7 +1,7 @@
-"""Landing Page Studio v7.15 - Build / Widgets / Outputs.
+"""Landing Page Studio v7.17 - Build / Widgets / Outputs.
 
 Drop-in replacement for the existing repository's app.py.
-Works with the original landing_engine.py and streamlit>=1.38,<3.
+Works with the original landing_engine.py and Streamlit >=1.56 (auto-height iframe).
 
 No AI API is called: research is handled externally by ChatGPT/Claude;
 this app previews the actual engine's supported widgets and renders three
@@ -991,20 +991,68 @@ const lolli=[['Seattle',92],['Denver',84],['Austin',79],['Boston',64],['Miami',5
 $('#lollipopChart').innerHTML=lolli.map(([city,value],i)=>`<button type="button" class="lolli-row" data-lolli="${city}" data-score="${value}" style="background:transparent;border:0;color:var(--ink);text-align:left"><b>${city}</b><span class="lolli-track" style="--width:${value}%;--dly:${i*110}ms"><i class="lolli-dot"></i></span><b>${value}</b></button>`).join('');all('[data-lolli]').forEach(el=>el.addEventListener('click',()=>$('#lolliHint').textContent=`${el.dataset.lolli}: ${el.dataset.score} out of 100 (fictional score).`));
 
 let galleryObserver=null;
+let parentScrollCleanup=null;
 function animate(){
   if(galleryObserver){galleryObserver.disconnect();galleryObserver=null;}
+  if(parentScrollCleanup){parentScrollCleanup();parentScrollCleanup=null;}
   ++numberRun;
   all('.widget').forEach(el=>{el.classList.remove('shown','animated');});
   all('.stat .number').forEach(el=>el.textContent='0');
   hideState();tapSelection=false;
-  // A layout read separates resetting from the replay, allowing CSS animations to restart.
+  // A layout read separates resetting from entrance animations.
   void document.body.offsetHeight;
   const reveal=el=>{
+    if(el.classList.contains('shown'))return;
     el.classList.add('shown','animated');
     if(el.dataset.widget==='metric_cards'&&!matchMedia('(prefers-reduced-motion: reduce)').matches)animateNumbers();
     else if(el.dataset.widget==='metric_cards')all('.stat .number').forEach(n=>n.textContent=n.dataset.count);
   };
   if(matchMedia('(prefers-reduced-motion: reduce)').matches){all('.widget').forEach(reveal);return;}
+
+  // st.iframe(height="content") grows to the *entire* gallery height. That means
+  // an observer inside the iframe would animate everything at once. Watch the
+  // parent Streamlit viewport instead so each card animates when scrolled to.
+  try {
+    const host=window.parent;
+    if(host!==window && host.document){
+      const frame=window.frameElement || [...host.document.querySelectorAll('iframe')].find(f=>f.contentWindow===window);
+      if(frame){
+        const pending=new Set(all('.widget'));
+        let frameRequested=false;
+        let ro=null;
+        let onScroll=null;
+        const removeWatchers=()=>{
+          host.removeEventListener('scroll',onScroll,true);
+          host.removeEventListener('resize',onScroll);
+          if(ro)ro.disconnect();
+        };
+        const checkVisibility=()=>{
+          frameRequested=false;
+          const iframeRect=frame.getBoundingClientRect();
+          const viewportHeight=host.innerHeight||host.document.documentElement.clientHeight;
+          for(const el of [...pending]){
+            const r=el.getBoundingClientRect();
+            const top=iframeRect.top+r.top;
+            const bottom=iframeRect.top+r.bottom;
+            if(bottom>0 && top<viewportHeight-40 && r.height>0){reveal(el);pending.delete(el);}
+          }
+          if(!pending.size)removeWatchers();
+        };
+        onScroll=()=>{
+          if(!frameRequested){frameRequested=true;requestAnimationFrame(checkVisibility);}
+        };
+        host.addEventListener('scroll',onScroll,true);
+        host.addEventListener('resize',onScroll);
+        if('ResizeObserver' in window){
+          ro=new ResizeObserver(onScroll);
+          ro.observe(document.documentElement);
+        }
+        parentScrollCleanup=removeWatchers;
+        onScroll();
+        return;
+      }
+    }
+  }catch(_err){/* Cross-origin embed: fall back to iframe observer below. */}
   if('IntersectionObserver' in window){
     galleryObserver=new IntersectionObserver(entries=>entries.forEach(entry=>{
       if(entry.isIntersecting){reveal(entry.target);galleryObserver?.unobserve(entry.target);}
@@ -1218,7 +1266,7 @@ with st.sidebar:
     if brand != "Action Network":
         st.caption("Note: the existing renderer marks this publication's palette as provisional until approved brand assets are supplied.")
     st.divider()
-    st.caption("v7.16 · 25 interactive widgets (8 renderer-ready, 17 gallery concepts; 4 map views) · No AI API · Existing landing_engine.py and requirements.txt unchanged")
+    st.caption("v7.17 · 25 interactive widgets (8 renderer-ready, 17 gallery concepts; 4 map views) · No AI API")
 
 # Keep Streamlit menus neutral (native Windows menu selection may remain blue).
 st.markdown(f"""<div class="brand-bar" style="background:{secondary};color:white;border-bottom:4px solid {primary}">
@@ -1259,8 +1307,11 @@ with build_tab:
 
 with widgets_tab:
     st.subheader("Explore interactive widgets · 25")
-    st.write(f"**25 interactive widget cards:** 8 supported by the current renderer and 17 concepts demonstrated in the gallery. All previews use **{brand}** colours and fictional data. Scroll **inside the gallery** to trigger animations. `Build (must - ...)` currently accepts only renderer-supported widgets.")
-    components.html(interactive_gallery_html(brand), height=1440, scrolling=True)
+    st.write(f"**25 interactive widget cards:** 8 supported by the current renderer and 17 concepts demonstrated in the gallery. All previews use **{brand}** colours and fictional data. Scroll the **page** to trigger animations. `Build (must - ...)` currently accepts only renderer-supported widgets.")
+    # Content-height iframe: no cropped 1,440px panel and no nested scrollbar.
+    # Streamlit 1.56+ measures the HTML height as widgets reflow on different screens.
+    # The gallery JavaScript observes the *parent* page scroll to reveal each widget.
+    st.iframe(interactive_gallery_html(brand), width="stretch", height="content")
     st.caption("All numbers in the gallery are fictional examples. The map demonstrates US state boundaries and loads Canadian province/territory boundaries from a public dataset when online and responsive metric panels. The current landing_engine.py supports the original 8 widgets. The 17 newer examples, including world choropleth, travel routes, sparkline KPI, benchmark range and infographic charts, remain gallery-only until the engine and AI blueprint instructions are upgraded. US choropleth is also a gallery-only enhancement.")
 
 with output_tab:
