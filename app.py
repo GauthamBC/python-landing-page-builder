@@ -26,7 +26,7 @@ st.set_page_config(page_title="Landing Page Studio", page_icon="📊", layout="w
 # The widget gallery mirrors the CURRENT renderer, not hypothetical widgets.
 # In particular, stand-alone line charts and donut charts are not yet implemented.
 WIDGETS = [
-    ("map", "Map", "Geographic pin map. Requires verified latitude and longitude.", "map"),
+    ("map", "Map", "Interactive brand-themed US, Canada, US & Canada or World map. Geographic data required.", "map"),
     ("table_ranking", "Ranking Table", "Sortable, searchable rankings with all source rows.", "ranking table"),
     ("ranking", "Ranking Bar Chart", "Animated ranking bars and a full-table toggle.", "bar chart"),
     ("comparison", "Comparison", "Compare two numeric measures side by side.", "comparison"),
@@ -38,7 +38,7 @@ WIDGETS = [
 
 # Exact aliases make 'Build (must - ranking table)' and similar instructions easy.
 ALIASES = {
-    "map": "map", "pin map": "map", "geographic map": "map",
+    "map": "map", "pin map": "map", "us map":"map", "world map":"map", "canada map":"map", "geographic map": "map",
     "ranking table": "table_ranking", "table": "table_ranking", "sortable table": "table_ranking",
     "ranking": "ranking", "ranking chart": "ranking", "ranking bar chart": "ranking",
     "bar chart": "ranking", "bar graph": "ranking",
@@ -1222,11 +1222,15 @@ def is_feasible(section: dict, dataset: dict):
     widget = section.get("type")
     numeric = available_metrics(dataset)
     if widget == "map":
-        if str(section.get("map_type", "pin")).lower() not in ("pin", "pins", "point", "points"):
-            raise ValueError("The current landing engine can export only pin maps. US/Canada/World choropleth modes are gallery-only until the engine upgrade.")
-        if not any(-90 <= to_float(r.get("latitude")) <= 90 and -180 <= to_float(r.get("longitude")) <= 180
-                   for r in dataset["rows"] if to_float(r.get("latitude")) is not None and to_float(r.get("longitude")) is not None):
-            raise ValueError(f"Map needs real numeric latitude/longitude in dataset '{dataset['id']}'. The current engine supports a pin map, not the gallery's choropleth.")
+        allowed = {"auto", "pin", "pins", "point", "points", "us", "usa", "canada", "ca", "us_canada", "north_america", "world", "global"}
+        map_type = str(section.get("map_type", "auto")).lower().replace("-", "_").replace(" ", "_")
+        if map_type not in allowed:
+            raise ValueError("Map type must be US, Canada, US & Canada, World or Auto.")
+        has_coords = any(to_float(r.get("latitude")) is not None and to_float(r.get("longitude")) is not None for r in dataset["rows"])
+        geo_columns = ("State", "state", "Province", "province", "Country", "country", "Region", "region", "State Name", "Province Name")
+        has_region = any(str(r.get(k) or "").strip() for r in dataset["rows"] for k in geo_columns)
+        if not (has_coords or has_region or dataset["entity_key"].lower() in ("state", "province", "country", "region")):
+            raise ValueError("Map requires verified coordinates or a State, Province, Country or Region column.")
     elif widget in ("comparison", "scatter", "metric_cards"):
         metrics = section.get("metrics") or []
         minimum = 1 if widget == "metric_cards" else 2
