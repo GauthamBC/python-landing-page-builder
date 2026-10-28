@@ -1,19 +1,22 @@
-"""Landing Page Studio v7.17 - Build / Widgets / Outputs.
+"""Landing Page Studio v7.20 - one Build button -> three automatic HTML versions.
 
 Drop-in replacement for the existing repository's app.py.
 Works with the original landing_engine.py and Streamlit >=1.56 (auto-height iframe).
 
 No AI API is called: research is handled externally by ChatGPT/Claude;
-this app previews the actual engine's supported widgets and renders three
-levels from a completed self-contained research JSON blueprint.
+this app takes an AI-written structured blueprint + CSV/Excel source data,
+then renders three HTML versions using the original engine.
 """
 from __future__ import annotations
 
 import copy
+import csv
 import hashlib
+import io
 import json
 import math
 import re
+import zipfile
 from html import escape
 
 import streamlit as st
@@ -1082,48 +1085,23 @@ def interactive_gallery_html(brand: str) -> str:
     return html
 
 
-def require_research_rows(raw: dict) -> None:
-    datasets = raw.get("datasets")
-    if datasets is not None:
-        if not isinstance(datasets, list) or not datasets:
-            raise ValueError("'datasets' must contain one or more nonempty research tables.")
-        for index, dataset in enumerate(datasets, 1):
-            if not isinstance(dataset, dict) or not isinstance(dataset.get("rows"), list) or not dataset["rows"]:
-                raise ValueError(f"Dataset {index} has no rows. Include the full research records in the JSON.")
-    elif not isinstance(raw.get("rows"), list) or not raw["rows"]:
-        raise ValueError("The blueprint must include 'datasets[].rows' or legacy 'rows'.")
-    if len(json.dumps(raw, ensure_ascii=False)) > 22_000_000:
-        raise ValueError("Research JSON exceeds the existing 22 MB limit.")
-
-
 def json_from_text(text: str) -> dict:
+    """The AI supplies data-bound editorial instructions, not Python code."""
     text = text.strip().lstrip("\ufeff")
-    fenced = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n```", text, flags=re.I | re.S)
-    if fenced:
-        text = fenced.group(1)
+    match = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n```", text, flags=re.I | re.S)
+    if match:
+        text = match.group(1)
     try:
-        parsed = json.loads(text)
+        result = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON at line {exc.lineno}: {exc.msg}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("The blueprint must be a JSON object, not an array.")
-    return parsed
-
-
-def required_widgets(instruction: str) -> list[str]:
-    text = instruction.strip()
-    if not text or text.lower() == "build":
-        return []
-    match = re.fullmatch(r"build\s*\(\s*must\s*[-:]\s*(.*?)\s*\)\s*", text, flags=re.I | re.S)
-    if not match:
-        raise ValueError("Use 'Build' or 'Build (must - map, ranking table)'. There is no Desired option.")
-    terms = [x.strip().lower().replace("_", " ").replace("-", " ") for x in match.group(1).split(",")]
-    if not all(terms):
-        raise ValueError("Include a widget name after 'must -'.")
-    unknown = [x for x in terms if x not in ALIASES]
-    if unknown:
-        raise ValueError("Unsupported widget: " + ", ".join(unknown) + ". Choose a name from the Widgets tab.")
-    return list(dict.fromkeys(ALIASES[x] for x in terms))
+        raise ValueError(
+            f"The AI input isn't valid structured JSON (line {exc.lineno}). "
+            "Ask ChatGPT or Claude for one JSON blueprint containing the copy, "
+            "spreadsheet column names and page.sections."
+        ) from exc
+    if not isinstance(result, dict):
+        raise ValueError("The AI input must be one JSON object, not a list.")
+    return result
 
 
 def to_float(value):
@@ -1134,109 +1112,401 @@ def to_float(value):
         return None
 
 
+def _safe_cell(value):
+    """Keep spreadsheet values, without executing formulas or altering source claims."""
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (float, int)):
+        return value if math.isfinite(value) else None
+    value = str(value).strip()
+    if value in ("", "—", "–"):
+        return None
+    # Common CSV number formats. Leave dates, codes and formatted identifiers intact.
+    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", value) and not (len(value)>1 and value[0]=="0" and value[1].isdigit()):
+        if len(value) < 16:
+            return float(value) if "." in value else int(value)
+    if re.fullmatch(r"[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?", value):
+        cleaned = value.replace(",", "")
+        return float(cleaned) if "." in cleaned else int(cleaned)
+    # Preserve the magnitude shown in the source (12.5% becomes 12.5, not 0.125).
+    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?%", value):
+        return float(value[:-1])
+    if re.fullmatch(r"[-+]?[£$€]\s*\d{1,3}(?:,\d{3})*(?:\.\d+)?", value):
+        cleaned = re.sub(r"[£$€,\s]", "", value)
+        return float(cleaned)
+    return value
+
+
+def read_upload_tables(uploaded) -> dict:
+    """Read CSV, XLSX, XLS; all sheets remain available for AI sheet bindings."""
+    if uploaded is None:
+        raise ValueError("Upload the research CSV or Excel file before building.")
+    raw = uploaded.getvalue()
+    if not raw:
+        raise ValueError("The uploaded research file is empty.")
+    if len(raw) > 30_000_000:
+        raise ValueError("The research file exceeds the 30 MB processing limit.")
+    extension = uploaded.name.rsplit(".", 1)[-1].lower()
+    grids = {}
+    if extension == "csv":
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = raw.decode("cp1252")
+        sample = text[:4000]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        except csv.Error:
+            dialect = csv.excel
+        grids["Sheet1"] = list(csv.reader(io.StringIO(text), dialect))
+    elif extension == "xlsx":
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        try:
+            for ws in wb.worksheets:
+                grids[ws.title] = [list(row) for row in ws.iter_rows(values_only=True)]
+        finally:
+            wb.close()
+    elif extension == "xls":
+        try:
+            import xlrd
+        except ImportError as exc:
+            raise ValueError("Legacy .xls files require xlrd. Install the updated requirements.txt.") from exc
+        book = xlrd.open_workbook(file_contents=raw)
+        for ws in book.sheets():
+            grids[ws.name] = [ws.row_values(i) for i in range(ws.nrows)]
+    else:
+        raise ValueError("Only .csv, .xlsx and .xls files are supported.")
+    if not grids:
+        raise ValueError("The research workbook contains no worksheets.")
+    if sum(len(grid) for grid in grids.values()) > 100_000:
+        raise ValueError("The workbook exceeds the 100,000-row processing limit.")
+    return grids
+
+
+def _rows_from_grid(grid: list, header_row: int, sheet: str) -> tuple[list, list]:
+    if not isinstance(header_row, int) or header_row < 1 or header_row > len(grid):
+        raise ValueError(f"Worksheet '{sheet}' has no header at row {header_row}.")
+    header = grid[header_row-1]
+    last = max((i for i, cell in enumerate(header) if cell is not None and str(cell).strip()), default=-1)
+    if last < 1:
+        raise ValueError(f"Worksheet '{sheet}', row {header_row}: need at least two named columns.")
+    keys = [str(v).strip() if v is not None else "" for v in header[:last+1]]
+    if any(not key for key in keys):
+        raise ValueError(f"Worksheet '{sheet}' has an unnamed column. Supply a valid header row in the AI input.")
+    if len(keys) != len(set(keys)):
+        raise ValueError(f"Worksheet '{sheet}' has duplicate column headings. Rename them before building.")
+    rows = []
+    for raw in grid[header_row:]:
+        if not any(i < len(raw) and raw[i] is not None and str(raw[i]).strip() for i in range(len(keys))):
+            continue
+        rows.append({key: _safe_cell(raw[i]) if i < len(raw) else None for i, key in enumerate(keys)})
+    if not rows:
+        raise ValueError(f"Worksheet '{sheet}' has no data rows under its headers.")
+    cols = [{"key":key,"label":key,"type":"number" if any(to_float(r[key]) is not None for r in rows) else "text"} for key in keys]
+    return rows, cols
+
+
+def attach_source_data(raw: dict, grids: dict) -> dict:
+    """Replace any AI-supplied rows with the uploaded spreadsheet (source of truth)."""
+    source = copy.deepcopy(raw)
+    definitions = source.get("datasets")
+    if definitions is None:
+        definitions = [{"id":"main", "sheet":next(iter(grids)),
+                        "entity_key":source.get("entity_key"), "primary_metric":source.get("primary_metric")}]
+    if not isinstance(definitions, list) or not definitions:
+        raise ValueError("'datasets' must be a non-empty list of spreadsheet bindings.")
+    assembled = []
+    names = {str(name).casefold(): name for name in grids}
+    for index, ds in enumerate(definitions, 1):
+        if not isinstance(ds, dict):
+            raise ValueError(f"Dataset definition {index} must be an object.")
+        sheet = ds.get("sheet")
+        if sheet is None:
+            if len(grids) != 1:
+                raise ValueError("This Excel file has multiple worksheets. Include 'sheet' for each dataset in the AI input: " + ", ".join(grids))
+            sheet = next(iter(grids))
+        actual = names.get(str(sheet).casefold())
+        if actual is None:
+            raise ValueError(f"AI input refers to worksheet '{sheet}', but the file contains: " + ", ".join(grids))
+        try:
+            hr = int(ds.get("header_row", 1))
+        except (ValueError, TypeError):
+            raise ValueError(f"Dataset '{sheet}': header_row must be an integer.")
+        rows, detected_cols = _rows_from_grid(grids[actual], hr, actual)
+        keys = [col["key"] for col in detected_cols]
+        entity = ds.get("entity_key") or next((c["key"] for c in detected_cols if c["type"]=="text"), keys[0])
+        numeric = [c["key"] for c in detected_cols if c["type"]=="number" and c["key"].lower() not in ("latitude","longitude")]
+        metric = ds.get("primary_metric") or (numeric[0] if numeric else None)
+        if entity not in keys:
+            raise ValueError(f"Dataset '{sheet}': entity column '{entity}' does not exist. Available: {', '.join(keys)}")
+        if metric not in keys or not any(to_float(r.get(metric)) is not None for r in rows):
+            raise ValueError(f"Dataset '{sheet}': primary metric '{metric}' must be an existing numeric column. Available numeric columns: {', '.join(numeric)}")
+        if not any(str(row.get(entity) or "").strip() for row in rows):
+            raise ValueError(f"Dataset '{sheet}': entity column '{entity}' has no values.")
+        supplied_cols = ds.get("columns") or []
+        custom = {c["key"]: c for c in supplied_cols if isinstance(c, dict) and c.get("key") in keys}
+        # Keep EVERY original spreadsheet column, even if AI did not mention it.
+        columns = [{**col, **custom.get(col["key"], {})} for col in detected_cols]
+        combined = {key: value for key, value in ds.items() if key not in ("rows", "columns")}
+        combined.update({"id":jid(ds.get("id") or actual), "title":ds.get("title") or actual,
+                         "rows":rows,"columns":columns,"entity_key":entity,"primary_metric":metric})
+        assembled.append(combined)
+    if len({d["id"] for d in assembled}) != len(assembled):
+        raise ValueError("Dataset identifiers must be unique.")
+    source["datasets"] = assembled
+    source["rows"] = assembled[0]["rows"]
+    source["columns"] = assembled[0]["columns"]
+    source["entity_key"] = assembled[0]["entity_key"]
+    source["primary_metric"] = assembled[0]["primary_metric"]
+    if len(json.dumps(source, ensure_ascii=False, default=str)) > 22_000_000:
+        raise ValueError("The resulting blueprint exceeds the 22 MB renderer limit.")
+    return source
+
+
 def available_metrics(dataset: dict) -> list[str]:
-    rows = dataset["rows"]
-    names = list(dict.fromkeys([c["key"] for c in dataset["columns"]] + [key for row in rows for key in row]))
-    return [key for key in names if any(to_float(row.get(key)) is not None for row in rows) and key not in ("latitude", "longitude")]
+    keys = [c["key"] for c in dataset["columns"]]
+    return [key for key in keys if key not in ("latitude", "longitude") and any(to_float(r.get(key)) is not None for r in dataset["rows"])]
 
 
-def has_coordinates(dataset: dict) -> bool:
-    for row in dataset["rows"]:
-        lat, lon = to_float(row.get("latitude")), to_float(row.get("longitude"))
-        if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
-            return True
-    return False
-
-
-def new_section(widget: str, dataset: dict, metrics: list[str]) -> dict:
-    title = {
-        "ranking": dataset["title"] + " Rankings",
-        "table_ranking": dataset["title"] + " Full Results",
-        "map": "Geographic Results",
-        "comparison": "Compare Two Measures",
-        "scatter": "How Two Measures Relate",
-        "heatmap": "Results Heatmap",
-        "metric_cards": "Key Measures",
-        "callout": "What the Data Reveals",
-    }[widget]
-    result = {"type": widget, "dataset_id": dataset["id"], "title": title,
-              "metric": dataset["primary_metric"], "limit": 12}
-    if widget in ("comparison", "scatter"):
-        result["metrics"] = metrics[:2]
-    if widget == "metric_cards":
-        result["metrics"] = metrics[:3]
-    if widget == "callout":
-        result["text"] = dataset.get("description") or "See the study findings and methodology for context."
-    return result
-
-
-def feasible(widget: str, dataset: dict, metrics: list[str]) -> bool:
+def is_feasible(section: dict, dataset: dict):
+    widget = section.get("type")
+    numeric = available_metrics(dataset)
     if widget == "map":
-        return has_coordinates(dataset)
-    if widget in ("comparison", "scatter"):
-        return len(metrics) >= 2
-    if widget == "metric_cards":
-        return len(metrics) >= 1
-    return True
+        if str(section.get("map_type", "pin")).lower() not in ("pin", "pins", "point", "points"):
+            raise ValueError("The current landing engine can export only pin maps. US/Canada/World choropleth modes are gallery-only until the engine upgrade.")
+        if not any(-90 <= to_float(r.get("latitude")) <= 90 and -180 <= to_float(r.get("longitude")) <= 180
+                   for r in dataset["rows"] if to_float(r.get("latitude")) is not None and to_float(r.get("longitude")) is not None):
+            raise ValueError(f"Map needs real numeric latitude/longitude in dataset '{dataset['id']}'. The current engine supports a pin map, not the gallery's choropleth.")
+    elif widget in ("comparison", "scatter", "metric_cards"):
+        metrics = section.get("metrics") or []
+        minimum = 1 if widget == "metric_cards" else 2
+        if len(metrics) < minimum or any(key not in numeric for key in metrics):
+            raise ValueError(f"'{widget}' in dataset '{dataset['id']}' requires {minimum} actual numeric metric column(s) in 'metrics'.")
+    elif widget in ("ranking", "table_ranking", "heatmap"):
+        metric = section.get("metric") or dataset["primary_metric"]
+        if metric not in numeric:
+            raise ValueError(f"Widget '{widget}' references nonexistent numeric column '{metric}'.")
 
 
-def three_versions(spec: dict, required: list[str]) -> dict[str, dict]:
-    """Construct different presentations from ONE verified dataset, no fabricated values.
+def compile_blueprint(ai: dict, grids: dict) -> dict:
+    """One AI-specified landing page; research values always come from the upload."""
+    if not str(ai.get("title", "")).strip():
+        raise ValueError("The AI input must contain a finished page 'title'.")
+    if not ai.get("intro") and not ai.get("summary"):
+        raise ValueError("The AI input must provide written research copy in 'intro' or 'summary'.")
+    raw = attach_source_data(ai, grids)
+    page = normalize(raw)
+    datasets = {d["id"]: d for d in page["datasets"]}
+    must_raw = ai.get("must_widgets", [])
+    if isinstance(must_raw, str):
+        must_raw = [must_raw]
+    if not isinstance(must_raw, list):
+        raise ValueError("'must_widgets' must be a list of widget names, or an empty list.")
+    must = []
+    for item in must_raw:
+        clean = str(item).casefold().strip().replace("_", " ").replace("-", " ")
+        if clean not in ALIASES:
+            raise ValueError(f"Mandatory widget '{item}' is not yet supported by the renderer. Gallery-only widgets require an engine update.")
+        key = ALIASES[clean]
+        if key not in must:
+            must.append(key)
+    recipe = ai.get("page") or {}
+    if not isinstance(recipe, dict):
+        raise ValueError("The AI input's 'page' must be an object containing 'sections'.")
+    given_sections = recipe.get("sections") or ai.get("sections")
+    if not isinstance(given_sections, list) or not given_sections:
+        raise ValueError("The AI input needs one 'page.sections' list containing the widgets for your landing page. No Simple/Standard/Detailed versions are needed.")
+    for copy_field in ("intro", "key_findings", "hero_stats", "summary", "subtitle", "overview_heading", "findings_heading", "findings_dek"):
+        if copy_field in recipe:
+            page[copy_field] = recipe[copy_field]
+    page["visual_style"] = str(ai.get("visual_style") or recipe.get("visual_style") or "editorial").lower()
+    if page["visual_style"] not in ("editorial", "minimal", "bold"):
+        page["visual_style"] = "editorial"
+    sections=[]
+    for index, given in enumerate(given_sections, 1):
+        if not isinstance(given, dict):
+            raise ValueError(f"Widget {index} is not an object.")
+        section=copy.deepcopy(given)
+        widget = str(section.get("type") or "").lower().strip().replace(" ", "_")
+        widget = ALIASES.get(widget.replace("_", " "), widget)
+        if widget not in WIDGET_TYPES:
+            raise ValueError(f"Widget '{widget}' is gallery-only or unknown. It cannot yet be rendered to HTML.")
+        dsid = jid(section.get("dataset_id") or page["datasets"][0]["id"])
+        if dsid not in datasets:
+            raise ValueError(f"Unknown dataset '{dsid}'.")
+        section.update({"type":widget, "dataset_id":dsid})
+        if widget in ("ranking", "table_ranking", "heatmap", "map"):
+            section.setdefault("metric", datasets[dsid]["primary_metric"])
+        is_feasible(section, datasets[dsid])
+        sections.append(section)
+    for wid in must:
+        if not any(s["type"] == wid for s in sections):
+            raise ValueError(f"Mandatory widget '{wid}' is missing from page.sections. Ask the AI to include it.")
+    # All source rows remain accessible, regardless of which charts AI chooses.
+    for dsid,dataset in datasets.items():
+        if not any(s["dataset_id"] == dsid and s["type"] in ("ranking", "table_ranking", "heatmap") for s in sections):
+            sections.append({"type":"table_ranking", "dataset_id":dsid, "title":dataset["title"] + " · Complete Results", "metric":dataset["primary_metric"]})
+    page["page"] = {"sections":sections}
+    page["template"] = {"template_id":"custom", "widgets":list(dict.fromkeys(s["type"] for s in sections)),
+                        "depth":"custom", "visual_style":page["visual_style"]}
+    check_selected_page(page)
+    return page
 
-    v6 engine's 'selected' mode is reused; the outdated template gallery is
-    not exposed to the user. No engine change is needed in this UI phase.
-    """
-    datasets = spec["datasets"]
-    primary = datasets[0]
-    primary_metrics = available_metrics(primary)
-    for widget in required:
-        if not feasible(widget, primary, primary_metrics):
-            if widget == "map":
-                raise ValueError("'Map - Must' requires verified numeric latitude and longitude in the research JSON. No locations will be invented.")
-            raise ValueError(f"'{widget}' cannot be built from the available numeric measures. Check the research JSON.")
+
+def compile_explicit_variants(ai: dict, grids: dict) -> dict:
+    """Use AI copy and sections, but Excel/CSV values; never invent content."""
+    if not str(ai.get("title", "")).strip():
+        raise ValueError("The AI input must contain a finished page 'title'.")
+    if not ai.get("intro") and not ai.get("summary"):
+        raise ValueError("The AI input must provide written research copy in 'intro' or 'summary'.")
+    if not isinstance(ai.get("versions"), dict):
+        raise ValueError("AI input needs 'versions' with Simple, Standard and Detailed layouts. It must decide the widgets for each version.")
+    raw = attach_source_data(ai, grids)
+    spec = normalize(raw)
+    datasets = {d["id"]: d for d in spec["datasets"]}
+    must_raw = ai.get("must_widgets", [])
+    if isinstance(must_raw, str):
+        must_raw = [must_raw]
+    if not isinstance(must_raw, list):
+        raise ValueError("'must_widgets' must be a list of widget names, or an empty list.")
+    must = []
+    for item in must_raw:
+        clean = str(item).casefold().strip().replace("_", " ").replace("-", " ")
+        if clean not in ALIASES:
+            raise ValueError(f"Mandatory widget '{item}' is not yet supported by the renderer. Gallery-only widgets require an engine update.")
+        key = ALIASES[clean]
+        if key not in must:
+            must.append(key)
     variants = {}
     for level in ("Simple", "Standard", "Detailed"):
+        recipe = next((v for k, v in ai["versions"].items() if str(k).casefold() == level.casefold()), None)
+        if not isinstance(recipe, dict) or not isinstance(recipe.get("sections"), list) or not recipe["sections"]:
+            raise ValueError(f"AI input must define 'versions.{level.lower()}.sections' with at least one widget.")
         page = copy.deepcopy(spec)
-        page["visual_style"] = {"Simple": "minimal", "Standard": "editorial", "Detailed": "bold"}[level]
-        if level == "Simple":
-            page["intro"] = page.get("intro", [])[:1]
-            page["key_findings"] = page.get("key_findings", [])[:3]
-        elif level == "Standard":
-            page["intro"] = page.get("intro", [])[:2]
-            page["key_findings"] = page.get("key_findings", [])[:5]
-        sections = []
-        seen = set()
-        def add(widget: str, ds: dict, *, mandatory: bool = False):
-            metrics = available_metrics(ds)
-            if not feasible(widget, ds, metrics):
-                return
-            key = (ds["id"], widget)
-            if key in seen:
-                return
-            seen.add(key)
-            sections.append(new_section(widget, ds, metrics))
-        # One ranking/chart widget per ranked dataset always ensures complete access.
-        for dataset in datasets:
-            add("ranking", dataset)
-        # Must means present in ALL three outputs, where source columns permit it.
-        for widget in required:
-            add(widget, primary, mandatory=True)
-        if level in ("Standard", "Detailed"):
-            for widget in ("map", "comparison", "metric_cards", "heatmap"):
-                if len(sections) >= (3 if level == "Standard" else 4):
-                    break
-                add(widget, primary)
-        if level == "Detailed":
-            for widget in ("heatmap", "scatter", "table_ranking", "metric_cards", "callout"):
-                add(widget, primary)
-        page["page"] = {"sections": sections}
-        page["template"] = {
-            "template_id": "custom", "widgets": list(dict.fromkeys(x["type"] for x in sections)),
-            "depth": "deep" if level == "Detailed" else "quick", "visual_style": page["visual_style"],
-        }
+        for copy_field in ("intro", "key_findings", "hero_stats", "summary", "subtitle", "overview_heading", "findings_heading", "findings_dek"):
+            if copy_field in recipe:
+                page[copy_field] = recipe[copy_field]
+        page["visual_style"] = {"Simple":"minimal", "Standard":"editorial", "Detailed":"bold"}[level]
+        sections=[]
+        for index, given in enumerate(recipe["sections"], 1):
+            if not isinstance(given, dict):
+                raise ValueError(f"{level}: widget {index} is not an object.")
+            section=copy.deepcopy(given)
+            widget = str(section.get("type") or "").lower().strip().replace(" ", "_")
+            widget = ALIASES.get(widget.replace("_", " "),widget)
+            if widget not in WIDGET_TYPES:
+                raise ValueError(f"{level}: widget '{widget}' is gallery-only or unknown. It cannot yet be rendered to HTML.")
+            dsid = jid(section.get("dataset_id") or spec["datasets"][0]["id"])
+            if dsid not in datasets:
+                raise ValueError(f"{level}: unknown dataset '{dsid}'.")
+            section.update({"type":widget, "dataset_id":dsid})
+            if widget in ("ranking","table_ranking","heatmap","map"):
+                section.setdefault("metric",datasets[dsid]["primary_metric"])
+            is_feasible(section,datasets[dsid])
+            sections.append(section)
+        for wid in must:
+            if not any(s["type"]==wid for s in sections):
+                raise ValueError(f"{level}: mandatory widget '{wid}' is missing. Have the AI include it in all three versions.")
+        # The current engine requires every ranked source worksheet to remain accessible.
+        for dsid,dataset in datasets.items():
+            if not any(s["dataset_id"] == dsid and s["type"] in ("ranking","table_ranking","heatmap") for s in sections):
+                sections.append({"type":"table_ranking","dataset_id":dsid,"title":dataset["title"]+" · Complete Results","metric":dataset["primary_metric"]})
+        page["page"] = {"sections":sections}
+        page["template"] = {"template_id":"custom", "widgets":list(dict.fromkeys(s["type"] for s in sections)),
+                            "depth":"deep" if level=="Detailed" else "quick", "visual_style":page["visual_style"]}
         check_selected_page(page)
         variants[level] = page
     return variants
+
+def zipped_html(html_by_level: dict, base: str) -> bytes:
+    target = io.BytesIO()
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for level, html in html_by_level.items():
+            archive.writestr(f"{base}-{level.lower()}.html",html)
+    return target.getvalue()
+
+
+def compile_three_variants(ai: dict, grids: dict) -> dict:
+    """Generate three HTML-ready blueprints from the same AI copy and uploaded data.
+
+    If the AI supplied separate versions, honor its choices exactly.
+    For older single-page blueprints, use progressively more of the AI's
+    selected sections. Never fabricate research claims or modify input rows.
+    """
+    if isinstance(ai.get("versions"), dict):
+        return compile_explicit_variants(ai, grids)
+
+    complete = compile_blueprint(ai, grids)
+    source_sections = complete["page"]["sections"]
+    raw_ai_sections = (ai.get("page") or {}).get("sections") or ai.get("sections") or []
+    count = len(raw_ai_sections)
+    source_sections = copy.deepcopy(source_sections)
+    must_names = ai.get("must_widgets") or []
+    if isinstance(must_names, str):
+        must_names = [must_names]
+    required = set()
+    for item in must_names:
+        key = str(item).casefold().strip().replace("_", " ").replace("-", " ")
+        if key in ALIASES:
+            required.add(ALIASES[key])
+
+    result = {}
+    for name in ("Simple", "Standard", "Detailed"):
+        spec = copy.deepcopy(complete)
+        if name == "Detailed":
+            sections = copy.deepcopy(source_sections)
+        else:
+            explicit = source_sections[:count]
+            if name == "Simple":
+                # Mandatory widgets take precedence. If none, show the primary
+                # ranking/table; a complete-table fallback is always supplied.
+                chosen = [s for s in explicit if s["type"] in required]
+                if not chosen:
+                    ranking = next((s for s in explicit if s["type"] in
+                                    ("ranking", "table_ranking", "heatmap")), None)
+                    chosen = [ranking or explicit[0]]
+                sections = copy.deepcopy(chosen)
+            else:
+                # A concise middle option; retain every mandatory widget.
+                target = 2 if len(explicit) <= 3 else 3
+                chosen = explicit[:target]
+                chosen.extend(s for s in explicit if s["type"] in required and s not in chosen)
+                sections = copy.deepcopy(chosen)
+            # Keep a complete source dataset accessible in all versions.
+            # This is essential for data transparency and required by the engine.
+            for ds in spec["datasets"]:
+                if not any(s.get("dataset_id") == ds["id"] and s["type"] in
+                           ("ranking", "table_ranking", "heatmap") for s in sections):
+                    existing = next((s for s in source_sections
+                                     if s.get("dataset_id") == ds["id"] and
+                                        s["type"] in ("ranking", "table_ranking", "heatmap")), None)
+                    sections.append(copy.deepcopy(existing) if existing else {
+                        "type": "table_ranking", "dataset_id": ds["id"],
+                        "title": ds["title"] + " · Complete Results",
+                        "metric": ds["primary_metric"]})
+
+        spec["page"]["sections"] = sections
+        spec["visual_style"] = {"Simple": "minimal", "Standard": "editorial", "Detailed": "bold"}[name]
+        spec["template"] = {
+            "template_id": "custom", "widgets": list(dict.fromkeys(s["type"] for s in sections)),
+            "depth": "deep" if name == "Detailed" else "quick", "visual_style": spec["visual_style"]}
+        if name == "Simple":
+            spec["intro"] = spec.get("intro", [])[:1]
+            spec["key_findings"] = spec.get("key_findings", [])[:2]
+            spec["hero_stats"] = spec.get("hero_stats", [])[:2]
+        elif name == "Standard":
+            spec["intro"] = spec.get("intro", [])[:2]
+            spec["key_findings"] = spec.get("key_findings", [])[:4]
+            spec["hero_stats"] = spec.get("hero_stats", [])[:3]
+        # The research methodology and original spreadsheet records are always retained.
+        check_selected_page(spec)
+        result[name] = spec
+    return result
 
 
 st.markdown("""<style>
@@ -1248,7 +1518,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 st.title("Landing Page Studio")
-st.caption("One research study. Three levels of storytelling. No templates to choose.")
+st.caption("One AI input and one research file. Click Build Landing Page to create three versions.")
 
 with st.sidebar:
     st.header("Publication Brand")
@@ -1262,102 +1532,117 @@ with st.sidebar:
     <div style="padding:10px;background:white;border:1px solid #dfe5ec;border-radius:9px;color:#273340">
     <div style="height:22px;border-radius:5px;background:{secondary}"></div>
     <small>SECONDARY</small><br><b>{secondary}</b></div></div>""", unsafe_allow_html=True)
-    st.caption("Both the widget gallery and the generated HTML use the selected publication's renderer palette.")
+    st.caption("Publication colours apply to the widget gallery and exported pages.")
     if brand != "Action Network":
-        st.caption("Note: the existing renderer marks this publication's palette as provisional until approved brand assets are supplied.")
+        st.caption("The renderer's non-AN palettes are provisional until approved brand assets are supplied.")
     st.divider()
-    st.caption("v7.17 · 25 interactive widgets (8 renderer-ready, 17 gallery concepts; 4 map views) · No AI API")
+    st.caption("v7.20 · 25 interactive gallery widgets · no AI API")
 
-# Keep Streamlit menus neutral (native Windows menu selection may remain blue).
 st.markdown(f"""<div class="brand-bar" style="background:{secondary};color:white;border-bottom:4px solid {primary}">
 <b>{escape(theme['wordmark'])}</b><span>Research landing page studio · brand-matched widget previews</span>
 </div>""", unsafe_allow_html=True)
 
-build_tab, widgets_tab, output_tab = st.tabs(["Build", "Widgets", "Outputs"])
+# Controlled navigation lets the Build callback open Outputs automatically.
+# Store AI text and research bytes outside widget keys: Streamlit cleans the state
+# of widgets that are not rendered on the currently selected screen.
+st.session_state.setdefault("studio_view", "Build")
 
-with build_tab:
-    st.subheader("Build your landing pages")
-    st.write("No template choice. Just your research and any mandatory widgets.")
-    left, right = st.columns([1.6, 1], gap="large")
-    with left:
-        with st.container(border=True):
-            source = st.file_uploader("Research file", type=["csv", "xlsx", "xls", "txt"], key="research_upload")
-            command = st.text_input("Build instruction (optional)", value="Build", key="build_instruction",
-                                    help="Example: Build (must - map, ranking table)")
-            try:
-                demanded = required_widgets(command)
-                if demanded:
-                    st.caption("Required in all versions: " + ", ".join(next(x[1] for x in WIDGETS if x[0] == widget) for widget in demanded))
-                else:
-                    st.caption("No mandatory widgets. The builder will choose suitable options.")
-            except ValueError as error:
-                st.error(str(error))
-            st.markdown("**Instruction to use in ChatGPT or Claude**")
-            st.code(command.strip() or "Build", language="text")
-            st.caption("Upload the research file in your AI conversation and use this instruction. Then download the completed research JSON and open Outputs. AI automation is a future stage.")
-            if source:
-                st.success(f"Selected: {source.name}. This file is not analysed locally in the current no-API version.")
-    with right:
-        with st.container(border=True):
-            st.markdown("#### Your three outputs")
-            st.markdown("**Simple**  \nOne main ranking/widget and concise findings. Mandatory widgets are added.")
-            st.markdown("**Standard**  \nUsually 2–3 data widgets with more context.")
-            st.markdown("**Detailed**  \nMore relevant widgets, deeper breakdowns and expanded findings.")
-            st.caption("All levels use the same verified research data. Unsupported mandatory widgets are reported, never silently removed.")
+class CachedUpload:
+    def __init__(self, name, data):
+        self.name = name
+        self._data = data
+    def getvalue(self):
+        return self._data
 
-with widgets_tab:
+def mark_build_dirty():
+    st.session_state["build_dirty"] = True
+
+def build_landing_page():
+    st.session_state.pop("build_error", None)
+    st.session_state.pop("build_info", None)
+    try:
+        ai_input = st.session_state.get("ai_blueprint_input", "")
+        research = st.session_state.get("research_upload")
+        selected_brand = st.session_state["studio_brand"]
+        if research is None and st.session_state.get("saved_research_bytes") is not None:
+            research = CachedUpload(st.session_state["saved_research_name"], st.session_state["saved_research_bytes"])
+        if not ai_input.strip():
+            raise ValueError("Paste the AI-written copy and JSON blueprint first.")
+        grids = read_upload_tables(research)
+        blueprint = json_from_text(ai_input)
+        variants = compile_three_variants(blueprint, grids)
+        pages = {name: render(spec, selected_brand, mode="selected") for name, spec in variants.items()}
+        signature = hashlib.sha256((ai_input + selected_brand).encode("utf-8") + research.getvalue()).hexdigest()
+        slug = jid(blueprint["title"])
+        st.session_state["rendered_html"] = pages
+        st.session_state["rendered_zip"] = zipped_html(pages, f"{slug}-{jid(selected_brand)}")
+        st.session_state["rendered_slug"] = slug
+        st.session_state["rendered_signature"] = signature
+        st.session_state["rendered_brand"] = selected_brand
+        st.session_state["saved_ai_input"] = ai_input
+        st.session_state["saved_research_name"] = research.name
+        st.session_state["saved_research_bytes"] = research.getvalue()
+        st.session_state["build_dirty"] = False
+        st.session_state["rendered_warnings"] = {name: validate(spec) for name, spec in variants.items()}
+        st.session_state["build_info"] = "Built Simple, Standard and Detailed pages from your AI copy and uploaded research."
+        # This callback runs before the app rerenders, so this navigation works.
+        st.session_state["studio_view"] = "Outputs"
+    except (ValueError, TypeError, KeyError, UnicodeDecodeError) as exc:
+        st.session_state["build_error"] = str(exc)
+        st.session_state["studio_view"] = "Build"
+    except Exception as exc:
+        st.session_state["build_error"] = f"Build failed: {type(exc).__name__}: {exc}"
+        st.session_state["studio_view"] = "Build"
+
+# One navigation control, one visible page and one main scrollbar.
+st.segmented_control("Sections", options=["Build", "Widgets", "Outputs"],
+                     key="studio_view", label_visibility="collapsed")
+
+if st.session_state["studio_view"] == "Build":
+    st.subheader("Build your landing page")
+    if "ai_blueprint_input" not in st.session_state:
+        st.session_state["ai_blueprint_input"] = st.session_state.get("saved_ai_input", "")
+    st.text_area("Enter the AI input", height=250, key="ai_blueprint_input",
+                 placeholder="Paste the AI's finished copy and structured JSON instructions...",
+                 help="AI decides the copy and feasible widgets. Paste JSON containing either versions.simple/standard/detailed, or page.sections. Python uses the uploaded spreadsheet as source of truth.",
+                 on_change=mark_build_dirty)
+    st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx", "xls"], key="research_upload", on_change=mark_build_dirty)
+    if st.session_state.get("saved_research_name") and st.session_state.get("research_upload") is None:
+        st.caption("Saved research file: " + st.session_state["saved_research_name"] + " · upload another file to replace it.")
+    st.button("Build Landing Page", type="primary", use_container_width=True,
+              on_click=build_landing_page)
+    if st.session_state.get("build_error"):
+        st.error(st.session_state["build_error"])
+
+elif st.session_state["studio_view"] == "Widgets":
     st.subheader("Explore interactive widgets · 25")
-    st.write(f"**25 interactive widget cards:** 8 supported by the current renderer and 17 concepts demonstrated in the gallery. All previews use **{brand}** colours and fictional data. Scroll the **page** to trigger animations. `Build (must - ...)` currently accepts only renderer-supported widgets.")
-    # Content-height iframe: no cropped 1,440px panel and no nested scrollbar.
-    # Streamlit 1.56+ measures the HTML height as widgets reflow on different screens.
-    # The gallery JavaScript observes the *parent* page scroll to reveal each widget.
+    st.write(f"**25 interactive widget cards:** 8 supported by the current renderer and 17 gallery concepts. All previews use **{brand}** colours and fictional values. Scroll down to reveal the animations.")
     st.iframe(interactive_gallery_html(brand), width="stretch", height="content")
-    st.caption("All numbers in the gallery are fictional examples. The map demonstrates US state boundaries and loads Canadian province/territory boundaries from a public dataset when online and responsive metric panels. The current landing_engine.py supports the original 8 widgets. The 17 newer examples, including world choropleth, travel routes, sparkline KPI, benchmark range and infographic charts, remain gallery-only until the engine and AI blueprint instructions are upgraded. US choropleth is also a gallery-only enhancement.")
+    st.caption("The current landing_engine.py exports eight widget types. Extra gallery concepts, including geographic choropleths, require a renderer upgrade before they can appear in final pages.")
 
-with output_tab:
-    st.subheader("Generate your three versions")
-    st.write("Upload the completed self-contained JSON from your AI research conversation. The existing Python engine will render Simple, Standard and Detailed HTML files.")
-    uploaded = st.file_uploader("Final research JSON", type=["json", "txt"], key="blueprint_upload")
-    pasted = ""
-    with st.expander("Or paste JSON instead"):
-        pasted = st.text_area("Research JSON", height=170, key="blueprint_paste", label_visibility="collapsed")
-    text_json = uploaded.getvalue().decode("utf-8-sig") if uploaded else pasted
-    data_signature = hashlib.sha256((text_json + brand + st.session_state.get("build_instruction", "Build")).encode("utf-8")).hexdigest()
-    if st.button("Generate 3 Versions", type="primary", use_container_width=True):
-        if not text_json.strip():
-            st.warning("Upload or paste a completed research JSON first.")
-        else:
-            try:
-                necessary = required_widgets(st.session_state.get("build_instruction", "Build"))
-                raw = json_from_text(text_json)
-                require_research_rows(raw)
-                spec = normalize(raw)
-                variants = three_versions(spec, necessary)
-                final_html = {name: render(page, brand, mode="selected") for name, page in variants.items()}
-                st.session_state["rendered_html"] = final_html
-                st.session_state["rendered_signature"] = data_signature
-                st.session_state["rendered_slug"] = jid(spec.get("slug") or spec["title"])
-                st.session_state["rendered_warnings"] = validate(spec)
-            except (ValueError, TypeError, KeyError, UnicodeDecodeError) as exc:
-                st.session_state.pop("rendered_html", None)
-                st.error(str(exc))
-            except Exception as exc:
-                st.session_state.pop("rendered_html", None)
-                st.error(f"Rendering failed: {type(exc).__name__}: {exc}")
-    if st.session_state.get("rendered_signature") == data_signature and "rendered_html" in st.session_state:
-        html_by_level = st.session_state["rendered_html"]
-        st.success("Three HTML versions generated from your research JSON. Review the figures and sources before publishing.")
-        for msg in st.session_state.get("rendered_warnings", []):
-            st.warning(msg)
-        tabs = st.tabs(["Simple", "Standard", "Detailed"])
-        for tab, level in zip(tabs, ("Simple", "Standard", "Detailed")):
+else:
+    st.subheader("Your landing-page versions")
+    pages = st.session_state.get("rendered_html")
+    if pages and st.session_state.get("rendered_brand") == brand and not st.session_state.get("build_dirty", False):
+        st.success(st.session_state.get("build_info", "Landing pages ready."))
+        st.download_button("Download all three HTML versions (.zip)",
+                           data=st.session_state["rendered_zip"],
+                           file_name=f"{st.session_state['rendered_slug']}-{jid(brand)}-versions.zip",
+                           mime="application/zip", use_container_width=True)
+        views = st.tabs(["Simple", "Standard", "Detailed"])
+        for name, tab in zip(["Simple", "Standard", "Detailed"], views):
             with tab:
-                html = html_by_level[level]
-                st.download_button(f"Download {level} HTML", data=html,
-                                   file_name=f"{st.session_state['rendered_slug']}-{jid(brand)}-{level.lower()}.html",
+                html = pages[name]
+                st.download_button(f"Download {name} HTML", data=html,
+                                   file_name=f"{st.session_state['rendered_slug']}-{jid(brand)}-{name.lower()}.html",
                                    mime="text/html", type="primary", use_container_width=True,
-                                   key=f"download_{level}")
-                components.html(html, height=900, scrolling=True)
+                                   key=f"download_{name.lower()}")
+                for warning in st.session_state.get("rendered_warnings", {}).get(name, []):
+                    st.warning(warning)
+                st.iframe(html, width="stretch", height="content")
+        st.caption("Verify source figures, editorial copy, visual accessibility and mobile rendering before publishing. All three pages are based on the same uploaded dataset(s).")
     else:
-        st.info("No current outputs. Upload the completed JSON and click Generate 3 Versions.")
-    st.caption("This release does not automatically write AI copy. New instructions/AI connection and deeper renderer upgrades are intentionally postponed.")
+        if pages and (st.session_state.get("rendered_brand") != brand or st.session_state.get("build_dirty")):
+            st.info("The AI input, research file or brand has changed. Return to Build and click Build Landing Page to refresh the outputs.")
+        else:
+            st.info("Your Simple, Standard and Detailed previews will appear here automatically after you click Build Landing Page. No second upload is needed.")
