@@ -1,17 +1,15 @@
-"""Landing Page Studio v7.20 - one Build button -> three automatic HTML versions.
+"""Landing Page Studio v7.21 - one AI input, one Build button, three HTML versions.
 
 Drop-in replacement for the existing repository's app.py.
 Works with the original landing_engine.py and Streamlit >=1.56 (auto-height iframe).
 
 No AI API is called: research is handled externally by ChatGPT/Claude;
-this app takes an AI-written structured blueprint + CSV/Excel source data,
-then renders three HTML versions using the original engine.
+this app takes an AI-written self-contained JSON blueprint (copy AND research
+rows), then renders three HTML versions using the original engine.
 """
 from __future__ import annotations
 
 import copy
-import csv
-import hashlib
 import io
 import json
 import math
@@ -20,7 +18,6 @@ import zipfile
 from html import escape
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 from landing_engine import BRANDS, WIDGET_TYPES, check_selected_page, jid, normalize, render, validate
 
@@ -1097,7 +1094,7 @@ def json_from_text(text: str) -> dict:
         raise ValueError(
             f"The AI input isn't valid structured JSON (line {exc.lineno}). "
             "Ask ChatGPT or Claude for one JSON blueprint containing the copy, "
-            "spreadsheet column names and page.sections."
+            "all datasets[].rows and page.sections (or versions)."
         ) from exc
     if not isinstance(result, dict):
         raise ValueError("The AI input must be one JSON object, not a list.")
@@ -1113,158 +1110,106 @@ def to_float(value):
 
 
 def _safe_cell(value):
-    """Keep spreadsheet values, without executing formulas or altering source claims."""
+    """Read embedded JSON values as data, never as executable instructions."""
     if value is None:
         return None
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
     if isinstance(value, bool):
         return str(value)
     if isinstance(value, (float, int)):
         return value if math.isfinite(value) else None
-    value = str(value).strip()
-    if value in ("", "—", "–"):
+    if not isinstance(value, str):
+        raise ValueError("Dataset cells must be strings, numbers, booleans or null.")
+    value = value.strip()
+    if not value or value in ("—", "–"):
         return None
-    # Common CSV number formats. Leave dates, codes and formatted identifiers intact.
-    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", value) and not (len(value)>1 and value[0]=="0" and value[1].isdigit()):
+    # Do not modify literal text identifiers (postal codes, IDs, dates).
+    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", value) and not (len(value) > 1 and value[0] == "0" and value[1].isdigit()):
         if len(value) < 16:
             return float(value) if "." in value else int(value)
     if re.fullmatch(r"[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?", value):
-        cleaned = value.replace(",", "")
-        return float(cleaned) if "." in cleaned else int(cleaned)
-    # Preserve the magnitude shown in the source (12.5% becomes 12.5, not 0.125).
+        clean = value.replace(",", "")
+        return float(clean) if "." in clean else int(clean)
     if re.fullmatch(r"[-+]?\d+(?:\.\d+)?%", value):
         return float(value[:-1])
     if re.fullmatch(r"[-+]?[£$€]\s*\d{1,3}(?:,\d{3})*(?:\.\d+)?", value):
-        cleaned = re.sub(r"[£$€,\s]", "", value)
-        return float(cleaned)
+        return float(re.sub(r"[£$€,\s]", "", value))
     return value
 
 
-def read_upload_tables(uploaded) -> dict:
-    """Read CSV, XLSX, XLS; all sheets remain available for AI sheet bindings."""
-    if uploaded is None:
-        raise ValueError("Upload the research CSV or Excel file before building.")
-    raw = uploaded.getvalue()
-    if not raw:
-        raise ValueError("The uploaded research file is empty.")
-    if len(raw) > 30_000_000:
-        raise ValueError("The research file exceeds the 30 MB processing limit.")
-    extension = uploaded.name.rsplit(".", 1)[-1].lower()
-    grids = {}
-    if extension == "csv":
-        try:
-            text = raw.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            text = raw.decode("cp1252")
-        sample = text[:4000]
-        try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
-        except csv.Error:
-            dialect = csv.excel
-        grids["Sheet1"] = list(csv.reader(io.StringIO(text), dialect))
-    elif extension == "xlsx":
-        from openpyxl import load_workbook
-        wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
-        try:
-            for ws in wb.worksheets:
-                grids[ws.title] = [list(row) for row in ws.iter_rows(values_only=True)]
-        finally:
-            wb.close()
-    elif extension == "xls":
-        try:
-            import xlrd
-        except ImportError as exc:
-            raise ValueError("Legacy .xls files require xlrd. Install the updated requirements.txt.") from exc
-        book = xlrd.open_workbook(file_contents=raw)
-        for ws in book.sheets():
-            grids[ws.name] = [ws.row_values(i) for i in range(ws.nrows)]
-    else:
-        raise ValueError("Only .csv, .xlsx and .xls files are supported.")
-    if not grids:
-        raise ValueError("The research workbook contains no worksheets.")
-    if sum(len(grid) for grid in grids.values()) > 100_000:
-        raise ValueError("The workbook exceeds the 100,000-row processing limit.")
-    return grids
+def attach_embedded_data(raw: dict) -> dict:
+    """Use every inline AI-provided research record; no CSV/Excel upload.
 
-
-def _rows_from_grid(grid: list, header_row: int, sheet: str) -> tuple[list, list]:
-    if not isinstance(header_row, int) or header_row < 1 or header_row > len(grid):
-        raise ValueError(f"Worksheet '{sheet}' has no header at row {header_row}.")
-    header = grid[header_row-1]
-    last = max((i for i, cell in enumerate(header) if cell is not None and str(cell).strip()), default=-1)
-    if last < 1:
-        raise ValueError(f"Worksheet '{sheet}', row {header_row}: need at least two named columns.")
-    keys = [str(v).strip() if v is not None else "" for v in header[:last+1]]
-    if any(not key for key in keys):
-        raise ValueError(f"Worksheet '{sheet}' has an unnamed column. Supply a valid header row in the AI input.")
-    if len(keys) != len(set(keys)):
-        raise ValueError(f"Worksheet '{sheet}' has duplicate column headings. Rename them before building.")
-    rows = []
-    for raw in grid[header_row:]:
-        if not any(i < len(raw) and raw[i] is not None and str(raw[i]).strip() for i in range(len(keys))):
-            continue
-        rows.append({key: _safe_cell(raw[i]) if i < len(raw) else None for i, key in enumerate(keys)})
-    if not rows:
-        raise ValueError(f"Worksheet '{sheet}' has no data rows under its headers.")
-    cols = [{"key":key,"label":key,"type":"number" if any(to_float(r[key]) is not None for r in rows) else "text"} for key in keys]
-    return rows, cols
-
-
-def attach_source_data(raw: dict, grids: dict) -> dict:
-    """Replace any AI-supplied rows with the uploaded spreadsheet (source of truth)."""
+    Users should include expected_row_count for each worksheet to detect
+    truncated AI outputs. We cannot verify data against the original workbook
+    unless it is also checked outside this app.
+    """
     source = copy.deepcopy(raw)
     definitions = source.get("datasets")
-    if definitions is None:
-        definitions = [{"id":"main", "sheet":next(iter(grids)),
-                        "entity_key":source.get("entity_key"), "primary_metric":source.get("primary_metric")}]
+    if definitions is None and isinstance(source.get("rows"), list):
+        definitions = [{"id": "main", "title": source.get("title", "Research"),
+                        "rows": source["rows"], "columns": source.get("columns") or [],
+                        "entity_key": source.get("entity_key"),
+                        "primary_metric": source.get("primary_metric"),
+                        "expected_row_count": source.get("expected_row_count") }]
     if not isinstance(definitions, list) or not definitions:
-        raise ValueError("'datasets' must be a non-empty list of spreadsheet bindings.")
+        raise ValueError("The AI input needs complete research records in 'datasets[].rows' (or top-level 'rows'). Ask AI to include all rows, not just the top 10.")
+    if len(json.dumps(source, ensure_ascii=False, allow_nan=False)) > 22_000_000:
+        raise ValueError("The AI blueprint exceeds 22 MB. Split oversized projects into smaller reports.")
+
     assembled = []
-    names = {str(name).casefold(): name for name in grids}
-    for index, ds in enumerate(definitions, 1):
+    seen_ids = set()
+    for idx, ds in enumerate(definitions, 1):
         if not isinstance(ds, dict):
-            raise ValueError(f"Dataset definition {index} must be an object.")
-        sheet = ds.get("sheet")
-        if sheet is None:
-            if len(grids) != 1:
-                raise ValueError("This Excel file has multiple worksheets. Include 'sheet' for each dataset in the AI input: " + ", ".join(grids))
-            sheet = next(iter(grids))
-        actual = names.get(str(sheet).casefold())
-        if actual is None:
-            raise ValueError(f"AI input refers to worksheet '{sheet}', but the file contains: " + ", ".join(grids))
-        try:
-            hr = int(ds.get("header_row", 1))
-        except (ValueError, TypeError):
-            raise ValueError(f"Dataset '{sheet}': header_row must be an integer.")
-        rows, detected_cols = _rows_from_grid(grids[actual], hr, actual)
-        keys = [col["key"] for col in detected_cols]
-        entity = ds.get("entity_key") or next((c["key"] for c in detected_cols if c["type"]=="text"), keys[0])
-        numeric = [c["key"] for c in detected_cols if c["type"]=="number" and c["key"].lower() not in ("latitude","longitude")]
+            raise ValueError(f"Dataset {idx} must be a JSON object.")
+        title = str(ds.get("title") or f"Dataset {idx}")
+        ident = jid(ds.get("id") or f"dataset-{idx}")
+        if ident in seen_ids:
+            raise ValueError(f"Duplicate dataset identifier: '{ident}'.")
+        seen_ids.add(ident)
+        given_rows = ds.get("rows")
+        if not isinstance(given_rows, list) or not given_rows:
+            raise ValueError(f"'{title}' is missing 'rows'. Have AI embed the entire worksheet in datasets[].rows.")
+        if len(given_rows) > 100_000:
+            raise ValueError(f"'{title}' contains too many rows (over 100,000).")
+        if not all(isinstance(row, dict) for row in given_rows):
+            raise ValueError(f"'{title}': each research row must be an object with named fields.")
+        expected = ds.get("expected_row_count", ds.get("source_row_count"))
+        if expected is not None:
+            if isinstance(expected, bool) or not str(expected).strip().isdigit():
+                raise ValueError(f"'{title}': expected_row_count must be a nonnegative whole number.")
+            if len(given_rows) != int(expected):
+                raise ValueError(f"'{title}' has {len(given_rows):,} embedded records, but the AI says the research has {int(expected):,}. Ask AI for the missing rows before publishing.")
+        keys = list(dict.fromkeys(str(key) for row in given_rows for key in row))
+        if not keys or any(not k.strip() for k in keys):
+            raise ValueError(f"'{title}' has empty column names.")
+        rows = [{key: _safe_cell(row.get(key)) for key in keys} for row in given_rows]
+        inferred = [{"key": key, "label": key, "type": "number" if any(to_float(r.get(key)) is not None for r in rows) else "text"} for key in keys]
+        supplied_columns = ds.get("columns") or []
+        if not isinstance(supplied_columns, list):
+            raise ValueError(f"'{title}': 'columns' must be a list.")
+        custom = {}
+        for col in supplied_columns:
+            if not isinstance(col, dict) or col.get("key") not in keys:
+                raise ValueError(f"'{title}' column metadata names a field not present in the embedded rows.")
+            custom[col["key"]] = col
+        columns = [{**col, **custom.get(col["key"], {})} for col in inferred]
+        entity = ds.get("entity_key") or next((c["key"] for c in columns if c["type"] == "text"), keys[0])
+        numeric = [c["key"] for c in columns if any(to_float(r.get(c["key"])) is not None for r in rows) and c["key"].casefold() not in ("latitude", "longitude")]
         metric = ds.get("primary_metric") or (numeric[0] if numeric else None)
-        if entity not in keys:
-            raise ValueError(f"Dataset '{sheet}': entity column '{entity}' does not exist. Available: {', '.join(keys)}")
-        if metric not in keys or not any(to_float(r.get(metric)) is not None for r in rows):
-            raise ValueError(f"Dataset '{sheet}': primary metric '{metric}' must be an existing numeric column. Available numeric columns: {', '.join(numeric)}")
-        if not any(str(row.get(entity) or "").strip() for row in rows):
-            raise ValueError(f"Dataset '{sheet}': entity column '{entity}' has no values.")
-        supplied_cols = ds.get("columns") or []
-        custom = {c["key"]: c for c in supplied_cols if isinstance(c, dict) and c.get("key") in keys}
-        # Keep EVERY original spreadsheet column, even if AI did not mention it.
-        columns = [{**col, **custom.get(col["key"], {})} for col in detected_cols]
-        combined = {key: value for key, value in ds.items() if key not in ("rows", "columns")}
-        combined.update({"id":jid(ds.get("id") or actual), "title":ds.get("title") or actual,
-                         "rows":rows,"columns":columns,"entity_key":entity,"primary_metric":metric})
+        if entity not in keys or not all(str(row.get(entity) or "").strip() for row in rows):
+            raise ValueError(f"'{title}': entity_key '{entity}' must exist and identify every row.")
+        if metric not in numeric:
+            raise ValueError(f"'{title}': primary_metric '{metric}' must be an existing numeric field. Available: {', '.join(numeric) or 'none'}. The current engine requires numeric research data.")
+        combined = {k: v for k, v in ds.items() if k not in ("rows", "columns")}
+        combined.update({"id": ident, "title": title, "rows": rows,
+                         "columns": columns, "entity_key": entity,
+                         "primary_metric": metric})
         assembled.append(combined)
-    if len({d["id"] for d in assembled}) != len(assembled):
-        raise ValueError("Dataset identifiers must be unique.")
     source["datasets"] = assembled
     source["rows"] = assembled[0]["rows"]
     source["columns"] = assembled[0]["columns"]
     source["entity_key"] = assembled[0]["entity_key"]
     source["primary_metric"] = assembled[0]["primary_metric"]
-    if len(json.dumps(source, ensure_ascii=False, default=str)) > 22_000_000:
-        raise ValueError("The resulting blueprint exceeds the 22 MB renderer limit.")
     return source
 
 
@@ -1293,13 +1238,13 @@ def is_feasible(section: dict, dataset: dict):
             raise ValueError(f"Widget '{widget}' references nonexistent numeric column '{metric}'.")
 
 
-def compile_blueprint(ai: dict, grids: dict) -> dict:
-    """One AI-specified landing page; research values always come from the upload."""
+def compile_blueprint(ai: dict) -> dict:
+    """One AI-specified landing page using its embedded source data."""
     if not str(ai.get("title", "")).strip():
         raise ValueError("The AI input must contain a finished page 'title'.")
     if not ai.get("intro") and not ai.get("summary"):
         raise ValueError("The AI input must provide written research copy in 'intro' or 'summary'.")
-    raw = attach_source_data(ai, grids)
+    raw = attach_embedded_data(ai)
     page = normalize(raw)
     datasets = {d["id"]: d for d in page["datasets"]}
     must_raw = ai.get("must_widgets", [])
@@ -1320,7 +1265,7 @@ def compile_blueprint(ai: dict, grids: dict) -> dict:
         raise ValueError("The AI input's 'page' must be an object containing 'sections'.")
     given_sections = recipe.get("sections") or ai.get("sections")
     if not isinstance(given_sections, list) or not given_sections:
-        raise ValueError("The AI input needs one 'page.sections' list containing the widgets for your landing page. No Simple/Standard/Detailed versions are needed.")
+        raise ValueError("The AI input needs one 'page.sections' list containing the widgets for your landing page. Alternatively include explicit versions.simple, versions.standard and versions.detailed.")
     for copy_field in ("intro", "key_findings", "hero_stats", "summary", "subtitle", "overview_heading", "findings_heading", "findings_dek"):
         if copy_field in recipe:
             page[copy_field] = recipe[copy_field]
@@ -1358,15 +1303,15 @@ def compile_blueprint(ai: dict, grids: dict) -> dict:
     return page
 
 
-def compile_explicit_variants(ai: dict, grids: dict) -> dict:
-    """Use AI copy and sections, but Excel/CSV values; never invent content."""
+def compile_explicit_variants(ai: dict) -> dict:
+    """Use AI-supplied copy, sections and embedded research rows; invent nothing."""
     if not str(ai.get("title", "")).strip():
         raise ValueError("The AI input must contain a finished page 'title'.")
     if not ai.get("intro") and not ai.get("summary"):
         raise ValueError("The AI input must provide written research copy in 'intro' or 'summary'.")
     if not isinstance(ai.get("versions"), dict):
         raise ValueError("AI input needs 'versions' with Simple, Standard and Detailed layouts. It must decide the widgets for each version.")
-    raw = attach_source_data(ai, grids)
+    raw = attach_embedded_data(ai)
     spec = normalize(raw)
     datasets = {d["id"]: d for d in spec["datasets"]}
     must_raw = ai.get("must_widgets", [])
@@ -1431,17 +1376,17 @@ def zipped_html(html_by_level: dict, base: str) -> bytes:
     return target.getvalue()
 
 
-def compile_three_variants(ai: dict, grids: dict) -> dict:
-    """Generate three HTML-ready blueprints from the same AI copy and uploaded data.
+def compile_three_variants(ai: dict) -> dict:
+    """Generate three HTML-ready blueprints from the same AI copy and embedded data.
 
     If the AI supplied separate versions, honor its choices exactly.
     For older single-page blueprints, use progressively more of the AI's
     selected sections. Never fabricate research claims or modify input rows.
     """
     if isinstance(ai.get("versions"), dict):
-        return compile_explicit_variants(ai, grids)
+        return compile_explicit_variants(ai)
 
-    complete = compile_blueprint(ai, grids)
+    complete = compile_blueprint(ai)
     source_sections = complete["page"]["sections"]
     raw_ai_sections = (ai.get("page") or {}).get("sections") or ai.get("sections") or []
     count = len(raw_ai_sections)
@@ -1503,7 +1448,7 @@ def compile_three_variants(ai: dict, grids: dict) -> dict:
             spec["intro"] = spec.get("intro", [])[:2]
             spec["key_findings"] = spec.get("key_findings", [])[:4]
             spec["hero_stats"] = spec.get("hero_stats", [])[:3]
-        # The research methodology and original spreadsheet records are always retained.
+        # The research methodology and all AI-embedded data records are retained.
         check_selected_page(spec)
         result[name] = spec
     return result
@@ -1518,7 +1463,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 st.title("Landing Page Studio")
-st.caption("One AI input and one research file. Click Build Landing Page to create three versions.")
+st.caption("Paste the complete AI research blueprint, then click Build Landing Page to generate three versions. No spreadsheet upload here.")
 
 with st.sidebar:
     st.header("Publication Brand")
@@ -1536,58 +1481,42 @@ with st.sidebar:
     if brand != "Action Network":
         st.caption("The renderer's non-AN palettes are provisional until approved brand assets are supplied.")
     st.divider()
-    st.caption("v7.20 · 25 interactive gallery widgets · no AI API")
+    st.caption("v7.21 · 25 interactive gallery widgets · no AI API")
 
 st.markdown(f"""<div class="brand-bar" style="background:{secondary};color:white;border-bottom:4px solid {primary}">
 <b>{escape(theme['wordmark'])}</b><span>Research landing page studio · brand-matched widget previews</span>
 </div>""", unsafe_allow_html=True)
 
-# Controlled navigation lets the Build callback open Outputs automatically.
-# Store AI text and research bytes outside widget keys: Streamlit cleans the state
-# of widgets that are not rendered on the currently selected screen.
+# Preserve text and outputs independently of the currently displayed tab.
+# Streamlit removes widget state when its widget disappears on a different view.
 st.session_state.setdefault("studio_view", "Build")
-
-class CachedUpload:
-    def __init__(self, name, data):
-        self.name = name
-        self._data = data
-    def getvalue(self):
-        return self._data
 
 def mark_build_dirty():
     st.session_state["build_dirty"] = True
+
 
 def build_landing_page():
     st.session_state.pop("build_error", None)
     st.session_state.pop("build_info", None)
     try:
         ai_input = st.session_state.get("ai_blueprint_input", "")
-        research = st.session_state.get("research_upload")
         selected_brand = st.session_state["studio_brand"]
-        if research is None and st.session_state.get("saved_research_bytes") is not None:
-            research = CachedUpload(st.session_state["saved_research_name"], st.session_state["saved_research_bytes"])
         if not ai_input.strip():
-            raise ValueError("Paste the AI-written copy and JSON blueprint first.")
-        grids = read_upload_tables(research)
+            raise ValueError("Paste the AI-written blueprint containing the copy and full research data.")
         blueprint = json_from_text(ai_input)
-        variants = compile_three_variants(blueprint, grids)
+        variants = compile_three_variants(blueprint)
         pages = {name: render(spec, selected_brand, mode="selected") for name, spec in variants.items()}
-        signature = hashlib.sha256((ai_input + selected_brand).encode("utf-8") + research.getvalue()).hexdigest()
         slug = jid(blueprint["title"])
         st.session_state["rendered_html"] = pages
         st.session_state["rendered_zip"] = zipped_html(pages, f"{slug}-{jid(selected_brand)}")
         st.session_state["rendered_slug"] = slug
-        st.session_state["rendered_signature"] = signature
         st.session_state["rendered_brand"] = selected_brand
         st.session_state["saved_ai_input"] = ai_input
-        st.session_state["saved_research_name"] = research.name
-        st.session_state["saved_research_bytes"] = research.getvalue()
         st.session_state["build_dirty"] = False
         st.session_state["rendered_warnings"] = {name: validate(spec) for name, spec in variants.items()}
-        st.session_state["build_info"] = "Built Simple, Standard and Detailed pages from your AI copy and uploaded research."
-        # This callback runs before the app rerenders, so this navigation works.
+        st.session_state["build_info"] = "Built Simple, Standard and Detailed pages from the AI's copy and embedded research records."
         st.session_state["studio_view"] = "Outputs"
-    except (ValueError, TypeError, KeyError, UnicodeDecodeError) as exc:
+    except (ValueError, TypeError, KeyError, UnicodeDecodeError, OverflowError) as exc:
         st.session_state["build_error"] = str(exc)
         st.session_state["studio_view"] = "Build"
     except Exception as exc:
@@ -1602,13 +1531,10 @@ if st.session_state["studio_view"] == "Build":
     st.subheader("Build your landing page")
     if "ai_blueprint_input" not in st.session_state:
         st.session_state["ai_blueprint_input"] = st.session_state.get("saved_ai_input", "")
-    st.text_area("Enter the AI input", height=250, key="ai_blueprint_input",
-                 placeholder="Paste the AI's finished copy and structured JSON instructions...",
-                 help="AI decides the copy and feasible widgets. Paste JSON containing either versions.simple/standard/detailed, or page.sections. Python uses the uploaded spreadsheet as source of truth.",
+    st.text_area("Enter the AI input", height=300, key="ai_blueprint_input",
+                 placeholder="Paste one self-contained JSON blueprint with editorial copy, complete datasets[].rows and widget instructions...",
+                 help="Paste complete JSON from ChatGPT/Claude. Include every source row in datasets[].rows, each dataset's expected_row_count and either versions or page.sections. There is no spreadsheet upload.",
                  on_change=mark_build_dirty)
-    st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx", "xls"], key="research_upload", on_change=mark_build_dirty)
-    if st.session_state.get("saved_research_name") and st.session_state.get("research_upload") is None:
-        st.caption("Saved research file: " + st.session_state["saved_research_name"] + " · upload another file to replace it.")
     st.button("Build Landing Page", type="primary", use_container_width=True,
               on_click=build_landing_page)
     if st.session_state.get("build_error"):
@@ -1640,9 +1566,9 @@ else:
                 for warning in st.session_state.get("rendered_warnings", {}).get(name, []):
                     st.warning(warning)
                 st.iframe(html, width="stretch", height="content")
-        st.caption("Verify source figures, editorial copy, visual accessibility and mobile rendering before publishing. All three pages are based on the same uploaded dataset(s).")
+        st.caption("Verify the AI-embedded records against your original spreadsheet, as well as copy, sources, accessibility and mobile layout before publishing. Streamlit does not independently read or verify the original workbook.")
     else:
         if pages and (st.session_state.get("rendered_brand") != brand or st.session_state.get("build_dirty")):
-            st.info("The AI input, research file or brand has changed. Return to Build and click Build Landing Page to refresh the outputs.")
+            st.info("The AI input or brand has changed. Return to Build and click Build Landing Page to refresh the outputs.")
         else:
-            st.info("Your Simple, Standard and Detailed previews will appear here automatically after you click Build Landing Page. No second upload is needed.")
+            st.info("Your Simple, Standard and Detailed previews will appear here automatically after you click Build Landing Page. No file upload is needed.")
