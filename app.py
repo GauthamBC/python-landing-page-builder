@@ -1,4 +1,4 @@
-"""Landing Page Studio v7.13 - Build / Widgets / Outputs.
+"""Landing Page Studio v7.15 - Build / Widgets / Outputs.
 
 Drop-in replacement for the existing repository's app.py.
 Works with the original landing_engine.py and streamlit>=1.38,<3.
@@ -341,9 +341,6 @@ td{border-bottom-color:var(--brand-line)}tr:hover td{background:color-mix(in srg
 /* finishing touches after visual review */
 .radar-svg{width:min(100%,430px);height:auto;max-height:250px;display:block;margin:0 auto}
 .funnel-level{clip-path:none;border-radius:5px;justify-content:space-between;padding:9px 16px}
-.gallery-intro{grid-column:1/-1;border-bottom:1px solid var(--brand-line);padding:22px 4px 12px;margin-top:3px}
-.gallery-intro strong{display:block;color:var(--ink);font-size:21px;letter-spacing:-.02em}
-.gallery-intro span{display:block;font-size:12px;color:var(--muted);margin-top:4px}
 
 
 /* v7.11: single geographical widget, three views, segment controls */
@@ -372,6 +369,13 @@ td{border-bottom-color:var(--brand-line)}tr:hover td{background:color-mix(in srg
 @media(max-width:390px){.geo-map-btn{font-size:11px;padding:10px 4px}.geo-world-panel[data-map-mode="na"] .world-map{height:250px}}
 @media(prefers-reduced-motion:reduce){.geo-mode-panel.is-entering,.geo-world-panel.is-entering .world-country.target{animation:none!important}.geo-map-btn{transition:none!important}}
 
+/* v7.14: Canada-only is a focused view of the SAME 13 verified Canadian geometries.
+   US and inset features are hidden when the country focus is active. */
+.geo-na-panel[data-map-mode="canada"] .na-region[data-country="United States"],
+.geo-na-panel[data-map-mode="canada"] .na-map-label[data-country="United States"]{display:none!important}
+.geo-na-panel[data-map-mode="canada"] .na-map{max-height:620px}
+@media(max-width:640px){.geo-map-switcher{gap:6px}.geo-map-btn{font-size:11px;padding:10px 7px;flex:1 1 calc(50% - 6px)}}
+
 /* v7.12: separate US + Canada admin-level geographic panel */
 .geo-na-panel .na-stage{position:relative;padding:17px 18px 12px;background:radial-gradient(circle at 52% 36%,var(--brand-horizon),var(--brand-ocean) 78%);border:1px solid var(--brand-line);border-radius:9px;overflow:hidden}
 .na-topline{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding-bottom:12px;border-bottom:1px solid var(--brand-line)}
@@ -396,9 +400,10 @@ td{border-bottom-color:var(--brand-line)}tr:hover td{background:color-mix(in srg
 <header><div><div class="eyebrow">Interactive widget gallery</div><div class="preview-count"><span class="count-pill" id="widgetCount">25 widgets</span><span class="small">8 engine-ready · 17 gallery concepts</span></div><div class="headbrand"><span>●</span> __BRAND__ <span style="color:#738f9d">/ Live previews</span></div></div><button class="replay" type="button" id="replay" aria-label="Replay chart animations">↻ Replay animations</button></header>
 <div class="gallery" id="gallery">
 <section class="widget feature reveal" data-widget="map">
-<div class="widget-head"><div><div class="eyebrow">Geographic storytelling / interactive</div><div class="widget-title" style="font-size:clamp(20px,2.8vw,32px);margin-top:7px">Interactive maps · three geographic views</div><div class="widget-description">Switch between the US state map, North America and the world. Hover, focus or tap a region to explore illustrative data.</div></div><span class="tag">Build (must - map)</span></div>
+<div class="widget-head"><div><div class="eyebrow">Geographic storytelling / interactive</div><div class="widget-title" style="font-size:clamp(20px,2.8vw,32px);margin-top:7px">Interactive maps · four geographic views</div><div class="widget-description">Switch between the US, Canada, both countries and the world. Hover, focus or tap a region to explore illustrative data.</div></div><span class="tag">Build (must - map)</span></div>
 <div class="widget-body"><div class="geo-map-switcher" role="group" aria-label="Choose a geographic map view">
   <button type="button" class="geo-map-btn active" data-geo-mode="us" aria-pressed="true">US only</button>
+  <button type="button" class="geo-map-btn" data-geo-mode="canada" aria-pressed="false">Canada only</button>
   <button type="button" class="geo-map-btn" data-geo-mode="na" aria-pressed="false">US &amp; Canada</button>
   <button type="button" class="geo-map-btn" data-geo-mode="world" aria-pressed="false">World</button>
   <span id="geoMapModeDescription" class="geo-map-mode-description" aria-live="polite">State-level interactive map · 50 US states</span>
@@ -642,8 +647,6 @@ td{border-bottom-color:var(--brand-line)}tr:hover td{background:color-mix(in srg
  <div class="widget-body"><svg class="slope-svg" id="slopeSvg" viewBox="0 0 470 220" role="img" aria-label="Illustrative rankings in two periods"><g class="mini-grid"><path d="M117 20V192M345 20V192"></path></g><g class="mini-axis"><text x="73" y="12">Before</text><text x="311" y="12">After</text><text x="24" y="213">2024</text><text x="315" y="213">2026</text></g><g id="slopeLines"></g></svg><div class="mini-tooltip" id="slopeHint" aria-live="polite">Hover over a line to view a fictional ranking change.</div></div>
 </section>
 
-<div class="gallery-intro"><div class="eyebrow">More ways to tell the story</div><strong>Interactive infographics and visual storytelling</strong><span>12 additional animated demonstrations inspired by travel, sports, financial and geographic research.</span></div>
-<!-- 12 additional user-inspired interactive infographic demonstrations. All numerical content fictional. -->
 <section class="widget reveal" data-widget="route_arcs"><div class="widget-head"><div><div class="widget-title">Travel / route arcs</div><div class="widget-description">Animated origin-to-destination curves for flights, travel, and schedules.</div></div><span class="preview-only">New concept</span></div><div class="widget-body"><div class="route-stage"><svg viewBox="0 0 480 225" role="img" aria-label="Illustrative route arcs from Honolulu to five destinations"><g class="route-grid"><path d="M25 196H455 M25 146H455 M25 96H455 M25 46H455 M110 14V196 M240 14V196 M370 14V196"/></g><g id="routeLines"></g><circle cx="47" cy="184" r="7" class="route-dot"/><text class="route-text" x="20" y="212">Honolulu</text></svg></div><div class="infographic-foot" id="routeHint">Hover or focus a route to see its distance.</div></div></section>
 <section class="widget reveal" data-widget="sparkline_kpi"><div class="widget-head"><div><div class="widget-title">KPI card + sparkline</div><div class="widget-description">Headline metric with a fine-grained animated trend and changing values.</div></div><span class="preview-only">New concept</span></div><div class="widget-body"><div class="spark-card"><div class="spark-meta">ILLUSTRATIVE MONTHLY REVENUE</div><div class="spark-top"><strong class="spark-number" id="sparkNumber">$317,911</strong><span class="spark-delta">+2.0% ↗</span></div><svg class="spark-svg" viewBox="0 0 430 118" role="img" aria-label="Animated fictional revenue sparkline"><defs><linearGradient id="sparkFade" x1="0" x2="0" y1="0" y2="1"><stop stop-color="var(--primary)" stop-opacity=".25"/><stop offset="1" stop-color="var(--primary)" stop-opacity="0"/></linearGradient></defs><path class="spark-area" d="M8 97 L8 84 L45 67 L78 76 L109 42 L146 59 L180 64 L210 40 L248 55 L277 89 L312 59 L344 28 L377 41 L417 19 L417 97Z"/><path class="spark-line" id="sparkLine" d="M8 84 L45 67 L78 76 L109 42 L146 59 L180 64 L210 40 L248 55 L277 89 L312 59 L344 28 L377 41 L417 19"/><line class="spark-cursor" id="sparkCursor" x1="8" x2="8" y1="8" y2="96"/><circle class="spark-point" id="sparkPoint" cx="8" cy="84" r="6"/></svg><div class="range-ends"><span>Jan</span><span>Mar</span><span>May</span><span>Jul</span><span>Sep</span><span>Dec</span></div></div><div class="infographic-foot" id="sparkHint">Move over the line to inspect a sample value.</div></div></section>
 <section class="widget reveal" data-widget="range_spectrum"><div class="widget-head"><div><div class="widget-title">Price range / benchmark spectrum</div><div class="widget-description">Compare low, average and high prices on one animated scale.</div></div><span class="preview-only">New concept</span></div><div class="widget-body"><div class="infographic-canvas"><div class="range-chart"><div class="range-heading">$1,378.69 price spread</div><div class="range-sub">Family-of-four arena cost · fictional comparison</div><div class="range-rail"><span class="range-marker" id="rangeMarker" data-label="NBA average" style="--x:29%"></span></div><div class="range-ends"><span><b>$551.86</b> · lowest</span><span><b>$1,930.55</b> · highest</span></div><div class="range-actions" id="rangeActions"><button type="button" data-range="0">Lowest</button><button type="button" data-range="1" class="active">Average</button><button type="button" data-range="2">Highest</button></div></div></div><div class="infographic-foot" id="rangeHint">NBA average: $954.64 in this fictional illustration.</div></div></section>
@@ -814,7 +817,7 @@ all('.world-country').forEach(el=>{if(!el.dataset.score)return;el.style.setPrope
 const mapViewButtons=all('[data-geo-mode]');
 const usMapPanel=$('#usMapPanel'),northAmericaPanel=$('#northAmericaPanel'),globalMapPanel=$('#globalMapPanel');
 const geoMapDescription=$('#geoMapModeDescription');
-const mapModeDescriptions={us:'50 US states · state-level fictional rankings',na:'US states + Canadian provinces and territories · 63 regions',world:'World · seven highlighted fictional country scores'};
+const mapModeDescriptions={us:'50 US states · state-level fictional rankings',canada:'Canada · 10 provinces + 3 territories · 13 regions',na:'US states + Canadian provinces and territories · 63 regions',world:'World · seven highlighted fictional country scores'};
 let naLoaded=false,naLoadingPromise=null,naTouchSelected=false;
 const naSvg=$('#naMapSvg'),naGroup=$('#naRegions'),naLabels=$('#naLabels'),naTip=$('#naTip'),naStage=$('#naStage');
 all('.world-country.target').forEach((el,i)=>el.style.setProperty('--reveal-index',i%9));
@@ -849,7 +852,7 @@ function naTooltipAt(clientX,clientY){const rect=naStage.getBoundingClientRect()
  if(y+h>rect.height-8)y=Math.max(8,rect.height-h-8);
  naTip.style.left=x+'px';naTip.style.top=y+'px';
 }
-function naSelect(el,e){if(geoMode!=='na')return;all('.na-region.active').forEach(x=>x.classList.remove('active'));el.classList.add('active');
+function naSelect(el,e){if(geoMode!=='na'&&geoMode!=='canada')return;all('.na-region.active').forEach(x=>x.classList.remove('active'));el.classList.add('active');
  naTip.innerHTML='<b>'+el.dataset.name+'</b><small>'+el.dataset.country+' · illustrative result</small><strong>'+el.dataset.score+' / 100</strong><small>Fictional score, for gallery demonstration only</small>';
  naTip.classList.add('visible');naTip.setAttribute('aria-hidden','false');
  const r=el.getBoundingClientRect();naTooltipAt(e?.clientX??(r.left+r.width/2),e?.clientY??(r.top+r.height/2));
@@ -877,9 +880,9 @@ function naRenderRegion(name,country,geometry,i,inset=null){
    const dx=inset.x+(inset.w-bbox.width*s)/2-bbox.x*s;
    const dy=inset.y+(inset.h-bbox.height*s)/2-bbox.y*s;
    path.setAttribute('transform',`translate(${dx.toFixed(3)},${dy.toFixed(3)}) scale(${s.toFixed(5)})`);
-   const label=document.createElementNS(ns,'text');label.textContent=inset.code+' · inset';label.setAttribute('x',String(inset.x+inset.w/2));label.setAttribute('y',String(inset.y-8));label.setAttribute('class','na-map-label na-inset-label');naLabels.appendChild(label);
+   const label=document.createElementNS(ns,'text');label.textContent=inset.code+' · inset';label.setAttribute('x',String(inset.x+inset.w/2));label.setAttribute('y',String(inset.y-8));label.setAttribute('class','na-map-label na-inset-label');label.dataset.country=country;naLabels.appendChild(label);
  }else{
-   try{const bbox=path.getBBox();if(bbox.width>31&&bbox.height>23&&bbox.width*bbox.height>1450){const label=document.createElementNS(ns,'text');label.textContent=naAbbr[name]||name.slice(0,2).toUpperCase();label.setAttribute('x',(bbox.x+bbox.width/2).toFixed(1));label.setAttribute('y',(bbox.y+bbox.height/2).toFixed(1));label.setAttribute('class','na-map-label');naLabels.appendChild(label)}}catch(_e){}
+   try{const bbox=path.getBBox();if(bbox.width>31&&bbox.height>23&&bbox.width*bbox.height>1450){const label=document.createElementNS(ns,'text');label.textContent=naAbbr[name]||name.slice(0,2).toUpperCase();label.setAttribute('x',(bbox.x+bbox.width/2).toFixed(1));label.setAttribute('y',(bbox.y+bbox.height/2).toFixed(1));label.setAttribute('class','na-map-label');label.dataset.country=country;naLabels.appendChild(label)}}catch(_e){}
  }
 }
 async function naLoad(){if(naLoaded)return;if(naLoadingPromise)return naLoadingPromise;
@@ -893,13 +896,15 @@ async function naLoad(){if(naLoaded)return;if(naLoadingPromise)return naLoadingP
   // our US map SVG, so add them as separate clickable geographic insets.
   const unexpected=missingUS.filter(name=>name!=='Alaska'&&name!=='Hawaii');
   if(unexpected.length||missingCA.length)throw new Error('Missing administrative boundaries: '+[...unexpected,...missingCA].join(', '));
+  // Draw with all regions visible first so label placement and inset bounds work.
+  northAmericaPanel.dataset.mapMode='na';
   naGroup.innerHTML='';naLabels.innerHTML='';naSvg.hidden=false;let i=0;
   [...usRegions.map(f=>[f,'United States']),...caRegions.map(f=>[f,'Canada'])].forEach(([f,country])=>naRenderRegion(f.properties.name,country,f.geometry,i++));
   if(missingUS.includes('Alaska'))naRenderRegion('Alaska','United States',null,i++,{code:'AK',x:58,y:445,w:222,h:122});
   if(missingUS.includes('Hawaii'))naRenderRegion('Hawaii','United States',null,i++,{code:'HI',x:308,y:552,w:84,h:42});
   const actual=naGroup.querySelectorAll('.na-region').length;
   if(actual!==63)throw new Error('Expected 63 regions but rendered '+actual);
-  $('#naRegionCount').textContent='50 US states · 10 provinces · 3 territories';$('#naLoading').hidden=true;naSvg.hidden=false;naLoaded=true;
+  $('#naRegionCount').textContent='50 US states · 10 provinces · 3 territories';$('#naLoading').hidden=true;naSvg.hidden=false;naLoaded=true;naApplyMode();
  }catch(error){
   $('#naLoading').hidden=false;
   const msg=String(error.message||error);
@@ -909,14 +914,34 @@ async function naLoad(){if(naLoaded)return;if(naLoadingPromise)return naLoadingP
  })();return naLoadingPromise;
 }
 let geoMode='us';
+// Crop the existing combined choropleth to Canadian provincial geometry.
+// No second fetch, duplicate map instance or invented boundaries are necessary.
+function naApplyMode(){
+ const canadaOnly=geoMode==='canada';
+ northAmericaPanel.dataset.mapMode=canadaOnly?'canada':'na';
+ $('#naRegionCount').textContent=canadaOnly?'10 provinces · 3 territories':'50 US states · 10 provinces · 3 territories';
+ northAmericaPanel.querySelector('.na-topline strong').textContent=canadaOnly?'Canada · Provincial & Territorial Explorer':'US & Canada · Regional Explorer';
+ northAmericaPanel.querySelector('.na-foot span').textContent=canadaOnly?'All 10 provinces and 3 territories':'US states and Canadian provinces / territories only';
+ naSvg.setAttribute('aria-label',canadaOnly?'Canada only: interactive map of 10 provinces and 3 territories':'US and Canada: interactive map of 50 states and 13 Canadian regions');
+ if(!canadaOnly){naSvg.setAttribute('viewBox','0 0 1060 620');return}
+ if(!naLoaded)return;
+ const regions=all('.na-region[data-country="Canada"]',naGroup);
+ if(regions.length!==13)return;
+ const boxes=regions.map(p=>p.getBBox()).filter(b=>b.width>0&&b.height>0);
+ if(boxes.length!==13)return;
+ const minX=Math.min(...boxes.map(b=>b.x)),minY=Math.min(...boxes.map(b=>b.y));
+ const maxX=Math.max(...boxes.map(b=>b.x+b.width)),maxY=Math.max(...boxes.map(b=>b.y+b.height));
+ const padx=24,pady=30;
+ naSvg.setAttribute('viewBox',`${(minX-padx).toFixed(1)} ${(minY-pady).toFixed(1)} ${(maxX-minX+padx*2).toFixed(1)} ${(maxY-minY+pady*2).toFixed(1)}`);
+}
 function changeGeographicView(mode){
- if(!['us','na','world'].includes(mode))return;
+ if(!['us','canada','na','world'].includes(mode))return;
  geoMode=mode;worldHide();hideState();closeNaTip();tapSelection=false;
- usMapPanel.hidden=mode!=='us';northAmericaPanel.hidden=mode!=='na';globalMapPanel.hidden=mode!=='world';
+ usMapPanel.hidden=mode!=='us';northAmericaPanel.hidden=!['na','canada'].includes(mode);globalMapPanel.hidden=mode!=='world';
  mapViewButtons.forEach(button=>{const active=button.dataset.geoMode===mode;button.classList.toggle('active',active);button.setAttribute('aria-pressed',String(active))});
  geoMapDescription.textContent=mapModeDescriptions[mode];
- if(mode==='na')naLoad();
- const visible=mode==='us'?usMapPanel:mode==='na'?northAmericaPanel:globalMapPanel;
+ if(mode==='na'||mode==='canada'){naApplyMode();naLoad().then(()=>{if(geoMode==='na'||geoMode==='canada')naApplyMode()});}
+ const visible=mode==='us'?usMapPanel:['na','canada'].includes(mode)?northAmericaPanel:globalMapPanel;
  for(const p of [usMapPanel,northAmericaPanel,globalMapPanel])p.classList.remove('is-entering');
  if(!matchMedia('(prefers-reduced-motion: reduce)').matches){void visible.offsetWidth;visible.classList.add('is-entering')}
 }
@@ -1178,7 +1203,7 @@ with st.sidebar:
     if brand != "Action Network":
         st.caption("Note: the existing renderer marks this publication's palette as provisional until approved brand assets are supplied.")
     st.divider()
-    st.caption("v7.12 · 25 interactive widgets (8 renderer-ready, 17 gallery concepts; 3 map views) · No AI API · Existing landing_engine.py and requirements.txt unchanged")
+    st.caption("v7.15 · 25 interactive widgets (8 renderer-ready, 17 gallery concepts; 4 map views) · No AI API · Existing landing_engine.py and requirements.txt unchanged")
 
 # Keep Streamlit menus neutral (native Windows menu selection may remain blue).
 st.markdown(f"""<div class="brand-bar" style="background:{secondary};color:white;border-bottom:4px solid {primary}">
