@@ -236,6 +236,22 @@ td{border-bottom-color:var(--brand-line)}tr:hover td{background:color-mix(in srg
 /* v7.9 — extra brand-adaptive demonstrations; all data are fictional. */
 .preview-count{display:inline-flex;align-items:center;gap:8px;margin-top:6px;font-weight:800;color:var(--pale)}
 .count-pill{border:1px solid color-mix(in srgb,var(--primary) 70%,var(--brand-line));border-radius:50px;padding:5px 11px;background:color-mix(in srgb,var(--primary) 13%,var(--brand-panel));color:var(--primary);font-size:13px}
+
+/* v7.16: clear identity on the left and live widget count on the right. */
+.gallery-toolbar{display:flex;justify-content:space-between;align-items:center;gap:24px;flex-wrap:nowrap;padding:16px 0 20px}
+.gallery-identity{display:flex;flex-direction:column;gap:12px;min-width:0}
+.gallery-identity .headbrand{line-height:1.3}
+.live-preview-label{color:var(--muted)!important;font-weight:600}
+.gallery-tally{display:flex;flex-direction:column;align-items:flex-end;justify-content:center;gap:6px;flex-shrink:0;text-align:right}
+.gallery-tally .count-pill{font-size:17px;line-height:1.3;padding:8px 15px}
+.gallery-tally .small{font-size:11px;white-space:nowrap}
+@media(max-width:540px){
+ .gallery-toolbar{flex-wrap:wrap;gap:12px;padding-top:12px}
+ .gallery-identity{gap:8px}
+ .gallery-tally{margin-left:0;flex-direction:row;justify-content:space-between;align-items:center;gap:10px;width:100%;text-align:left}
+ .gallery-tally .count-pill{font-size:14px;padding:6px 10px;white-space:nowrap}
+ .gallery-tally .small{font-size:10px;white-space:normal;text-align:right}
+}
 .status-chip{white-space:nowrap;font-size:10px;color:#becdd5;border:1px solid var(--brand-line);border-radius:5px;padding:5px 7px;background:var(--brand-elevated)}
 .preview-card-label{margin-top:7px;font:700 10px/1.4 ui-monospace,monospace;color:var(--pale);white-space:normal}
 .demo-feature{font-size:11px;color:var(--muted);line-height:1.5;margin:4px 0 0}
@@ -397,7 +413,7 @@ td{border-bottom-color:var(--brand-line)}tr:hover td{background:color-mix(in srg
 @media(max-width:690px){.geo-na-panel .na-stage{padding:10px 8px}.na-topline span{font-size:10px}.na-scale{font-size:8px}.na-map-label{font-size:9px}.na-tip{padding:8px 9px;min-width:125px;max-width:165px}.na-tip b{font-size:13px}.na-tip strong{font-size:19px}.na-map{min-height:160px}}
 @media(prefers-reduced-motion:reduce){.geo-na-panel.is-entering .na-region{animation:none!important}}
 </style></head><body>
-<header><div><div class="eyebrow">Interactive widget gallery</div><div class="preview-count"><span class="count-pill" id="widgetCount">25 widgets</span><span class="small">8 engine-ready · 17 gallery concepts</span></div><div class="headbrand"><span>●</span> __BRAND__ <span style="color:#738f9d">/ Live previews</span></div></div><button class="replay" type="button" id="replay" aria-label="Replay chart animations">↻ Replay animations</button></header>
+<header class="gallery-toolbar"><div class="gallery-identity"><div class="eyebrow">Interactive widget gallery</div><div class="headbrand"><span>●</span> __BRAND__ <span class="live-preview-label">/ Live previews</span></div></div><div class="gallery-tally"><span class="count-pill" id="widgetCount">25 widgets</span><span class="small">8 engine-ready · 17 gallery concepts</span></div></header>
 <div class="gallery" id="gallery">
 <section class="widget feature reveal" data-widget="map">
 <div class="widget-head"><div><div class="eyebrow">Geographic storytelling / interactive</div><div class="widget-title" style="font-size:clamp(20px,2.8vw,32px);margin-top:7px">Interactive maps · four geographic views</div><div class="widget-description">Switch between the US, Canada, both countries and the world. Hover, focus or tap a region to explore illustrative data.</div></div><span class="tag">Build (must - map)</span></div>
@@ -996,7 +1012,6 @@ function animate(){
     all('.widget').forEach(el=>galleryObserver.observe(el));
   } else all('.widget').forEach(reveal);
 }
-$('#replay').addEventListener('click',animate);
 animate();
 })();
 </script></body></html>
@@ -1203,7 +1218,7 @@ with st.sidebar:
     if brand != "Action Network":
         st.caption("Note: the existing renderer marks this publication's palette as provisional until approved brand assets are supplied.")
     st.divider()
-    st.caption("v7.15 · 25 interactive widgets (8 renderer-ready, 17 gallery concepts; 4 map views) · No AI API · Existing landing_engine.py and requirements.txt unchanged")
+    st.caption("v7.16 · 25 interactive widgets (8 renderer-ready, 17 gallery concepts; 4 map views) · No AI API · Existing landing_engine.py and requirements.txt unchanged")
 
 # Keep Streamlit menus neutral (native Windows menu selection may remain blue).
 st.markdown(f"""<div class="brand-bar" style="background:{secondary};color:white;border-bottom:4px solid {primary}">
